@@ -1,0 +1,54 @@
+{
+  "name": "voice_agent_test_platform",
+  "description": "Future MCP tool surface for controlling the bot QA platform from Codex, Claude, or another MCP client.",
+  "tools": [
+    {
+      "name": "generate_test_suite",
+      "description": "Generate chat and voice test cases from a bot profile, flow docs, intents, logs, or Yellow.ai exports.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "bot_profile": {
+            "type": "object",
+            "description": "Bot name, business goal, channels, flow docs, intents, FAQs, and known constraints."
+          }
+        },
+        "required": ["bot_profile"]
+      }
+    },
+    {
+      "name": "run_test_suite",
+      "description": "Run a generated suite across chat, voice, or both channels.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "suite_id": { "type": "string" },
+          "channel": { "type": "string", "enum": ["all", "chat", "voice"] }
+        },
+        "required": ["suite_id"]
+      }
+    },
+    {
+      "name": "get_report",
+      "description": "Fetch a report with scores, transcripts, metrics, and recommendations.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "report_id": { "type": "string" }
+        },
+        "required": ["report_id"]
+      }
+    },
+    {
+      "name": "suggest_yellow_ai_changes",
+      "description": "Convert failed test findings into recommended Yellow.ai flow, intent, entity, or fallback changes.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "report_id": { "type": "string" }
+        },
+        "required": ["report_id"]
+      }
+    }
+  ]
+}

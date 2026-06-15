@@ -1,0 +1,9 @@
+# documenter.py uses only the Python standard library.
+#
+# Optional helpers:
+# - dashboard_scraper.py requires playwright
+# - extract_cookies.py requires browser-cookie3
+#
+# Install only if you need those helpers:
+# playwright
+# browser-cookie3
