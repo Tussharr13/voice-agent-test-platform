@@ -33,7 +33,8 @@ public.bot_qa_state
 The table stores the complete app workspace state as JSONB for now:
 
 ```text
-projects, chats, documents, change plans, suites, runs, reports, settings
+projects, chats, documents, change plans, suites, runs, reports, voice calls,
+voice sync runs, settings
 ```
 
 ## 2b. Prepare Product Schema
@@ -61,6 +62,8 @@ test_cases
 test_runs
 reports
 user_settings
+voice_calls
+voice_sync_runs
 ```
 
 The backend still uses `bot_qa_state` today. The normalized tables are the next
@@ -71,6 +74,20 @@ To verify the product tables from the terminal:
 
 ```bash
 python3 scripts/supabase_product.py check
+```
+
+If the product schema already exists and you only need the new voice analysis
+tables, run:
+
+```bash
+python3 scripts/supabase_state.py voice-schema
+```
+
+Copy that SQL into Supabase SQL editor and execute it. This creates:
+
+```text
+voice_calls
+voice_sync_runs
 ```
 
 ## 2c. Create Product Owner And Seed Normalized Tables
@@ -171,5 +188,7 @@ documents
 test_suites
 test_runs
 reports
+voice_calls
+voice_sync_runs
 change_plans
 ```

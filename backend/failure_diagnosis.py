@@ -86,6 +86,102 @@ def build_failure_investigation_packets(reports: List[Dict[str, Any]], snapshots
     return packets[:15]
 
 
+def build_readonly_specialist_brief(
+    project: Dict[str, Any],
+    reports: List[Dict[str, Any]],
+    snapshots: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build deterministic context that keeps Analyzer answers specific and read-only."""
+    packets = build_failure_investigation_packets(reports[:3], snapshots)
+    profile = project.get("bot_profile", {}) if isinstance(project.get("bot_profile"), dict) else {}
+    platform = str(profile.get("yellow_ai_platform") or project.get("yellow_ai_target", {}).get("platform") or "yellow_ai").lower()
+    return {
+        "mode": "read_only_yellow_ai_qa_agent",
+        "product_line": "Diagnose, recommend, and test. Do not edit.",
+        "strict_no_edit_policy": [
+            "Do not claim that Yellow.ai Studio, flows, agents, functions, APIs, KBs, databases, or production settings were changed.",
+            "Do not provide publish instructions as an action already taken.",
+            "You may recommend exact changes and regression tests, but edits require a future approval-gated executor that is out of scope right now.",
+        ],
+        "answer_contract": [
+            "Start with the pinpointed issue, not a generic summary.",
+            "Name the exact failed turn or say the transcript/log is missing.",
+            "Map the issue to the most likely Yellow.ai artifact: agent, workflow/flow, step, function, API, KB source, database table, fallback branch, or debug log.",
+            "Separate proven evidence from likely inference.",
+            "Give the concrete fix as a recommendation, not as an executed edit.",
+            "End with the regression test to rerun and the exact missing Yellow.ai page/log if confidence is not high.",
+        ],
+        "yellow_ai_navigation_hints": navigation_hints(platform),
+        "report_failure_count": len(packets),
+        "top_failure_briefs": [specialist_packet_brief(packet) for packet in packets[:8]],
+        "snapshot_index": [specialist_snapshot_brief(snapshot) for snapshot in snapshots[:3]],
+    }
+
+
+def navigation_hints(platform: str) -> List[Dict[str, str]]:
+    common = [
+        {"artifact": "conversation evidence", "where": "Conversation logs / Call logs / message trace for the failed run"},
+        {"artifact": "API/function evidence", "where": "Tools or Automation function/API configuration plus request/response logs"},
+        {"artifact": "KB evidence", "where": "Knowledge base source document, matched answer, or no-answer policy"},
+    ]
+    if "nexus" in platform or "v3" in platform:
+        return [
+            {"artifact": "agent routing", "where": "Studio > AI Agent > Agents > active agent detail"},
+            {"artifact": "super agent routing", "where": "Studio > AI Agent > Super Agent / Context Expert instructions"},
+            {"artifact": "workflow step", "where": "Studio > Build > Flows > active workflow or linked classic flow"},
+            *common,
+        ]
+    return [
+        {"artifact": "flow branch", "where": "Automation > Build > Flows > active flow detail"},
+        {"artifact": "intent routing", "where": "Automation > Train > Intents and utterances"},
+        {"artifact": "fallback", "where": "Automation > Build > Fallback flow and fallback intent handling"},
+        *common,
+    ]
+
+
+def specialist_packet_brief(packet: Dict[str, Any]) -> Dict[str, Any]:
+    failed_turn = packet.get("failed_turn", {}) if isinstance(packet.get("failed_turn"), dict) else {}
+    return {
+        "report_id": packet.get("report_id"),
+        "case_id": packet.get("case_id"),
+        "flow_name": packet.get("flow_name"),
+        "scenario_type": packet.get("scenario_type"),
+        "failure_type": packet.get("failure_type"),
+        "failed_turn": {
+            "turn": failed_turn.get("turn"),
+            "speaker": failed_turn.get("speaker"),
+            "text": str(failed_turn.get("text", ""))[:500],
+            "expected_text": str(failed_turn.get("expected_text", ""))[:500],
+        },
+        "likely_locations": packet.get("likely_yellow_ai_location", [])[:6],
+        "probable_root_cause": packet.get("probable_root_cause"),
+        "recommended_fix": packet.get("exact_fix_template"),
+        "regression_test": packet.get("verification_test"),
+        "platform_evidence": packet.get("platform_evidence", [])[:4],
+        "missing_evidence": packet.get("missing_evidence", [])[:3],
+        "ruled_out_artifacts": packet.get("ruled_out_artifacts", [])[:4],
+    }
+
+
+def specialist_snapshot_brief(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    pages = []
+    for page in snapshot.get("pages", [])[:12]:
+        pages.append(
+            {
+                "label": page.get("label"),
+                "title": page.get("title"),
+                "url": page.get("url"),
+            }
+        )
+    return {
+        "id": snapshot.get("id"),
+        "status": snapshot.get("status"),
+        "bot_id": snapshot.get("bot_id"),
+        "summary": str(snapshot.get("summary", ""))[:800],
+        "pages": pages,
+    }
+
+
 def should_investigate(score: Dict[str, Any]) -> bool:
     status = str(score.get("status") or "").lower()
     try:

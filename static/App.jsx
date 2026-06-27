@@ -30,6 +30,17 @@ const emptyProfile = {
   flow_docs: "Order status, cancel order, refund status, complaint, agent handoff, fallback recovery.",
 };
 
+function localDateInputValue(offsetDays = 0) {
+  const date = new Date();
+  date.setDate(date.getDate() + offsetDays);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+}
+
+function defaultDateFrom(daysBack = 7) {
+  const parsed = Math.max(1, Number.parseInt(daysBack, 10) || 7);
+  return localDateInputValue(-(parsed - 1));
+}
+
 const defaultChatAutomationScript = `## Greeting and scope
 
 #### Conversation Flow
@@ -253,6 +264,7 @@ function App() {
   const [changePlans, setChangePlans] = useState([]);
   const [platformSnapshots, setPlatformSnapshots] = useState([]);
   const [yellowAccess, setYellowAccess] = useState(null);
+  const [voiceData, setVoiceData] = useState(null);
   const [docsPages, setDocsPages] = useState([]);
   const [config, setConfig] = useState(null);
   const [profile, setProfile] = useState(emptyProfile);
@@ -280,6 +292,7 @@ function App() {
     setChangePlans([]);
     setPlatformSnapshots([]);
     setYellowAccess(null);
+    setVoiceData(null);
     setDocsPages([]);
     setConfig(null);
     setProfile(emptyProfile);
@@ -303,13 +316,14 @@ function App() {
       options.projectId ||
       (activeProjectId && nextProjects.some((project) => project.id === activeProjectId) ? activeProjectId : projectsPayload.active_project_id || nextProjects[0]?.id || "");
 
-    const [chatsPayload, suitesPayload, runsPayload, docsPayload, snapshotsPayload, accessPayload, docsPagesPayload, configPayload] = await Promise.all([
+    const [chatsPayload, suitesPayload, runsPayload, docsPayload, snapshotsPayload, accessPayload, voicePayload, docsPagesPayload, configPayload] = await Promise.all([
       api(projectQuery("/api/chats", nextProjectId)),
       api(projectQuery("/api/suites", nextProjectId)),
       api(projectQuery("/api/runs", nextProjectId)),
       api(projectQuery("/api/documents", nextProjectId)),
       api(projectQuery("/api/platform-snapshots", nextProjectId)),
       api(projectQuery("/api/project-access", nextProjectId)),
+      api(projectQuery("/api/voice", nextProjectId)),
       api("/api/docs/pages"),
       api("/api/config"),
     ]);
@@ -323,6 +337,7 @@ function App() {
     setChangePlans(docsPayload.change_plans || []);
     setPlatformSnapshots(snapshotsPayload.snapshots || []);
     setYellowAccess(accessPayload);
+    setVoiceData(voicePayload);
     setDocsPages(docsPagesPayload.pages || []);
     setConfig(configPayload);
 
@@ -450,10 +465,10 @@ function App() {
     await guarded("generate-suite", async () => {
       const profilePayload = { ...profile };
       if (extraChatContext && analyzerChat?.messages?.length) {
-        profilePayload.flow_docs = `${profilePayload.flow_docs}\n\nAnalyzer chat context:\n${analyzerChat.messages
+        profilePayload.recent_analyzer_context = analyzerChat.messages
           .slice(-8)
           .map((message) => `${message.role}: ${message.content}`)
-          .join("\n")}`;
+          .join("\n");
       }
       await api("/api/generate-suite", {
         method: "POST",
@@ -525,13 +540,69 @@ function App() {
     });
   }
 
+  async function runBotDiscovery(options = {}) {
+    await guarded("bot-discovery", async () => {
+      const output = await api("/api/bot-discovery/run", {
+        method: "POST",
+        body: JSON.stringify({ project_id: activeProjectId, bot_profile: profile, options }),
+      });
+      if (output.project?.id) {
+        setProjects((current) => current.map((project) => (project.id === output.project.id ? output.project : project)));
+        setProfile(output.project.bot_profile || profile);
+      }
+      await refresh({ keepReport: true });
+    });
+  }
+
   async function saveYellowAccess(access) {
     await guarded("yellow-access", async () => {
-      await api("/api/project-access", {
+      const savedAccess = await api("/api/project-access", {
         method: "POST",
         body: JSON.stringify({ project_id: activeProjectId, ...access }),
       });
+      if (savedAccess?.bot_id) {
+        const discoveredProfile = {
+          ...profile,
+          yellow_ai_bot_id: savedAccess.bot_id,
+          yellow_ai_environment: savedAccess.environment || profile.yellow_ai_environment,
+          yellow_ai_ui_base_url: savedAccess.ui_base_url || profile.yellow_ai_ui_base_url || "https://cloud.yellow.ai",
+          yellow_ai_console_url: savedAccess.console_url || profile.yellow_ai_console_url,
+          chat_endpoint: savedAccess.chat_widget_url || profile.chat_endpoint,
+        };
+        try {
+          await api("/api/bot-discovery/run", {
+            method: "POST",
+            body: JSON.stringify({ project_id: activeProjectId, bot_profile: discoveredProfile, options: { headless: true } }),
+          });
+        } catch (discoveryError) {
+          console.warn("Bot discovery could not complete after saving access", discoveryError);
+        }
+      }
       await refresh({ keepReport: true });
+    });
+  }
+
+  async function saveVoiceAccess(access) {
+    await guarded("voice-access", async () => {
+      const output = await api("/api/voice/access", {
+        method: "POST",
+        body: JSON.stringify({ project_id: activeProjectId, ...access }),
+      });
+      setVoiceData((current) => ({ ...(current || {}), access: output }));
+      await refresh({ keepReport: true });
+    });
+  }
+
+  async function syncVoiceCalls(options) {
+    await guarded("voice-sync", async () => {
+      const output = await api("/api/voice/sync", {
+        method: "POST",
+        body: JSON.stringify({ project_id: activeProjectId, ...options }),
+      });
+      if (output.voice) setVoiceData(output.voice);
+      mergeRunOutput(output);
+      await refresh({ keepReport: true });
+      mergeRunOutput(output);
     });
   }
 
@@ -651,6 +722,7 @@ function App() {
             platformSnapshots={platformSnapshots}
             yellowAccess={yellowAccess}
             saveYellowAccess={saveYellowAccess}
+            runBotDiscovery={runBotDiscovery}
             runPlatformSnapshot={runPlatformSnapshot}
             config={config}
             loading={loading}
@@ -668,6 +740,9 @@ function App() {
             runSuite={runSuite}
             runChatAutomation={runChatAutomation}
             runGoalChatAutomation={runGoalChatAutomation}
+            voiceData={voiceData}
+            saveVoiceAccess={saveVoiceAccess}
+            syncVoiceCalls={syncVoiceCalls}
             goalBrief={activeProject?.goal_test_brief}
             openReport={openReport}
             config={config}
@@ -883,7 +958,7 @@ function TopBar({ activeTab, activeProject, loading, error }) {
   );
 }
 
-function AnalyzerTab({ chat, sendMessage, createSuite, attachReport, prepareGoalBrief, activeProject, documents, changePlans, suites, runs, platformSnapshots, yellowAccess, saveYellowAccess, runPlatformSnapshot, config, loading }) {
+function AnalyzerTab({ chat, sendMessage, createSuite, attachReport, prepareGoalBrief, activeProject, documents, changePlans, suites, runs, platformSnapshots, yellowAccess, saveYellowAccess, runBotDiscovery, runPlatformSnapshot, config, loading }) {
   const [message, setMessage] = useState("");
   const [showReportPicker, setShowReportPicker] = useState(false);
   function chooseReport(reportId) {
@@ -916,7 +991,7 @@ function AnalyzerTab({ chat, sendMessage, createSuite, attachReport, prepareGoal
             </>
           }
         />
-        <YellowAccessPrompt access={yellowAccess} saveYellowAccess={saveYellowAccess} loading={loading} />
+        <YellowAccessPrompt access={yellowAccess} saveYellowAccess={saveYellowAccess} runBotDiscovery={runBotDiscovery} loading={loading} />
         <ChatMessages chat={chat} empty="Start an analyzer chat for Yellow.ai docs, reports, RAG checks, or test planning." />
         <form
           className="chatComposer"
@@ -1010,7 +1085,7 @@ function ReportPickerDialog({ runs, suites, loading, onChoose, onClose }) {
   );
 }
 
-function YellowAccessPrompt({ access, saveYellowAccess, loading }) {
+function YellowAccessPrompt({ access, saveYellowAccess, runBotDiscovery, loading }) {
   const accessReady = Boolean(access?.bot_id && access?.api_key_configured);
   const [expanded, setExpanded] = useState(!accessReady);
   const [values, setValues] = useState({
@@ -1056,6 +1131,9 @@ function YellowAccessPrompt({ access, saveYellowAccess, loading }) {
           </div>
           <button className="secondaryButton" type="button" onClick={() => setExpanded(true)}>
             <Icon name="edit" /> Update access
+          </button>
+          <button className="secondaryButton" type="button" disabled={loading === "bot-discovery"} onClick={() => runBotDiscovery({ headless: true })}>
+            <Icon name="auto_awesome" /> {loading === "bot-discovery" ? "Discovering..." : "Discover bot"}
           </button>
         </div>
       </div>
@@ -1107,6 +1185,7 @@ function ContextPanel({ activeProject, documents, changePlans, suites, runs, pla
   const target = activeProject?.yellow_ai_target || {};
   const latestSnapshot = platformSnapshots[0];
   const goalBrief = activeProject?.goal_test_brief;
+  const botDiscovery = activeProject?.bot_discovery;
   return (
     <div className="contextStack">
       <div className="metricGrid">
@@ -1115,11 +1194,35 @@ function ContextPanel({ activeProject, documents, changePlans, suites, runs, pla
         <Metric label="Suites" value={suites.length} />
         <Metric label="Snapshots" value={platformSnapshots.length} />
       </div>
+      <div className="contextBlock specialistModeBlock">
+        <h3>Analyzer Mode</h3>
+        <div className="pillRow">
+          <Pill tone="ok">Read-only</Pill>
+          <Pill>Diagnose</Pill>
+          <Pill>Recommend</Pill>
+          <Pill>Test</Pill>
+        </div>
+        <p>Analyzer can pinpoint Yellow.ai issues and suggest exact fixes, but it will not edit Studio, publish, or mutate production.</p>
+      </div>
       <div className="contextBlock">
         <h3>Yellow.ai Target</h3>
         <div className="pillRow">
           {Object.keys(target).length ? Object.entries(target).map(([key, value]) => <Pill key={key}>{key.replaceAll("_", " ")}: {value}</Pill>) : <Pill>No target saved</Pill>}
         </div>
+      </div>
+      <div className="contextBlock">
+        <h3>Bot Discovery</h3>
+        {botDiscovery?.id ? (
+          <div className="snapshotSummary">
+            <div className="pillRow">
+              <Pill tone="ok">discovered</Pill>
+              <Pill>{botDiscovery.id}</Pill>
+            </div>
+            <p>{botDiscovery.summary}</p>
+          </div>
+        ) : (
+          <EmptyState title="No bot discovery" text="Save bot access, then run Discover bot to build project context automatically." />
+        )}
       </div>
       <div className="contextBlock">
         <h3>Provider Status</h3>
@@ -1164,6 +1267,7 @@ function ContextPanel({ activeProject, documents, changePlans, suites, runs, pla
         <h3>Suggested Next Actions</h3>
         <ul className="compactList">
           <li>{latestSnapshot ? `Use ${latestSnapshot.id} for failure root-cause analysis.` : "Run a platform snapshot to attach Studio context automatically."}</li>
+          <li>{botDiscovery?.id ? `Use discovered bot profile ${botDiscovery.id} for suite generation.` : "Run bot discovery after attaching Yellow.ai access."}</li>
           <li>{goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare a goal-driven test brief from Analyzer."}</li>
           <li>{changePlans[0] ? `Review ${changePlans[0].id} from ${changePlans[0].document_name}` : "Upload a Yellow.ai guide, flow spec, or transcript if API access is incomplete."}</li>
           <li>{suites[0] ? `Run or inspect ${suites[0].name}` : "Generate a first regression suite."}</li>
@@ -1215,75 +1319,342 @@ function scriptTitle(script) {
   return match ? match[1].trim() : "Custom script";
 }
 
-function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, runs, latestReport, runSuite, runChatAutomation, runGoalChatAutomation, goalBrief, openReport, config, loading }) {
+function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, runs, latestReport, runSuite, runChatAutomation, runGoalChatAutomation, voiceData, saveVoiceAccess, syncVoiceCalls, goalBrief, openReport, config, loading }) {
+  const [testMode, setTestMode] = useState("chat");
   const testChannel = "chat";
   const activeSuites = suites.filter((suite) => suiteHasChannel(suite, testChannel));
   const activeRuns = runs.filter((run) => runMatchesChannel(run, testChannel));
+  const voiceRuns = runs.filter((run) => runMatchesChannel(run, "voice"));
   const runsScrollRef = useRef(null);
   const activeCaseCount = activeSuites.reduce((total, suite) => total + suiteChannelCount(suite, testChannel), 0);
   const activeReport = reportHasChannel(latestReport, testChannel) ? latestReport : null;
+  const activeVoiceReport = reportHasChannel(latestReport, "voice") ? latestReport : null;
+  const voiceSummary = voiceData?.summary || {};
+  const modeSummary = testMode === "chat"
+    ? [
+        ["Suites", activeSuites.length],
+        ["Cases", activeCaseCount],
+        ["Runs", activeRuns.length],
+        ["Reports", activeRuns.filter((run) => run.report_id).length],
+      ]
+    : [
+        ["Calls", voiceSummary.total_calls || 0],
+        ["Failed", voiceSummary.failed_calls || 0],
+        ["Categorized", voiceSummary.categorized || 0],
+        ["Pending", voiceSummary.pending_deep_analysis || 0],
+      ];
   useEffect(() => {
     runsScrollRef.current?.scrollTo({ top: 0 });
   }, [activeRuns[0]?.id]);
   return (
     <div className="testingStack">
       <section className="workPanel testingModePanel">
-        <PanelHeader title="Testing Workspace" meta="YELLOW.AI CHAT TESTING" />
-        <div className="testingChannelTabs single">
-          <button className="active" type="button">
+        <PanelHeader title="Testing Workspace" meta={testMode === "chat" ? "YELLOW.AI CHAT TESTING" : "YELLOW.AI VOICE ANALYSIS"} />
+        <div className="testingChannelTabs">
+          <button className={testMode === "chat" ? "active" : ""} type="button" onClick={() => setTestMode("chat")}>
             <Icon name="chat" filled /> Chat Testing
+          </button>
+          <button className={testMode === "voice" ? "active" : ""} type="button" onClick={() => setTestMode("voice")}>
+            <Icon name="call" filled /> Voice Call Analysis
           </button>
         </div>
         <div className="testingModeSummary">
-          <Metric label="Suites" value={activeSuites.length} />
-          <Metric label="Cases" value={activeCaseCount} />
-          <Metric label="Runs" value={activeRuns.length} />
-          <Metric label="Reports" value={activeRuns.filter((run) => run.report_id).length} />
+          {modeSummary.map(([label, value]) => <Metric key={label} label={label} value={value} />)}
         </div>
       </section>
-      <div className="mainGrid testingGrid">
-        <section className="workPanel">
-          <PanelHeader title="Bot Core Config" meta="CHAT SUITE INPUTS" />
-          <BotCoreConfig
-            profile={profile}
-            setProfile={setProfile}
-            saveProfile={saveProfile}
-            generateSuite={() => generateSuite("chat")}
-            generateSuiteLabel="Generate Chat Suite"
-            loading={loading}
-          />
-        </section>
-        <section className="workPanel">
-          <PanelHeader title="Run Chat Tests" meta="REAL WEB-WIDGET AUTOMATION" />
-          <ChatAutomationPanel
-            profile={profile}
-            setProfile={setProfile}
-            runChatAutomation={runChatAutomation}
-            runGoalChatAutomation={runGoalChatAutomation}
-            goalBrief={goalBrief}
-            config={config}
-            loading={loading}
-          />
-        </section>
-      </div>
-      <div className="mainGrid testingGrid">
-        <section className="workPanel scrollPanel">
-          <PanelHeader title="Chat Suites" meta={`${activeSuites.length} TOTAL`} />
-          <div className="scrollRegion">
-            <SuiteList suites={activeSuites} channel={testChannel} runSuite={runSuite} loading={loading} />
+      {testMode === "chat" ? (
+        <>
+          <div className="mainGrid testingGrid">
+            <section className="workPanel">
+              <PanelHeader title="Bot Core Config" meta="CHAT SUITE INPUTS" />
+              <BotCoreConfig
+                profile={profile}
+                setProfile={setProfile}
+                saveProfile={saveProfile}
+                generateSuite={() => generateSuite("chat")}
+                generateSuiteLabel="Generate Chat Suite"
+                loading={loading}
+              />
+            </section>
+            <section className="workPanel">
+              <PanelHeader title="Run Chat Tests" meta="REAL WEB-WIDGET AUTOMATION" />
+              <ChatAutomationPanel
+                profile={profile}
+                setProfile={setProfile}
+                runChatAutomation={runChatAutomation}
+                runGoalChatAutomation={runGoalChatAutomation}
+                goalBrief={goalBrief}
+                config={config}
+                loading={loading}
+              />
+            </section>
           </div>
-        </section>
-        <section className="workPanel scrollPanel">
-          <PanelHeader title="Chat Runs" meta={`${activeRuns.length} RECENT`} />
-          <div className="scrollRegion" ref={runsScrollRef}>
-            <RunList runs={activeRuns} channel={testChannel} openReport={openReport} />
+          <div className="mainGrid testingGrid">
+            <section className="workPanel scrollPanel">
+              <PanelHeader title="Chat Suites" meta={`${activeSuites.length} TOTAL`} />
+              <div className="scrollRegion">
+                <SuiteList suites={activeSuites} channel={testChannel} runSuite={runSuite} loading={loading} />
+              </div>
+            </section>
+            <section className="workPanel scrollPanel">
+              <PanelHeader title="Chat Runs" meta={`${activeRuns.length} RECENT`} />
+              <div className="scrollRegion" ref={runsScrollRef}>
+                <RunList runs={activeRuns} channel={testChannel} openReport={openReport} />
+              </div>
+            </section>
           </div>
-        </section>
-      </div>
-      <section className="workPanel reportPanel">
-        <PanelHeader title="Chat Report" meta={activeReport?.id || "NO REPORT SELECTED"} />
-        <ReportView report={activeReport} channel={testChannel} />
+          <section className="workPanel reportPanel">
+            <PanelHeader title="Chat Report" meta={activeReport?.id || "NO REPORT SELECTED"} />
+            <ReportView report={activeReport} channel={testChannel} />
+          </section>
+        </>
+      ) : (
+        <VoiceAnalysisWorkspace
+          voiceData={voiceData}
+          saveVoiceAccess={saveVoiceAccess}
+          syncVoiceCalls={syncVoiceCalls}
+          voiceRuns={voiceRuns}
+          openReport={openReport}
+          activeVoiceReport={activeVoiceReport}
+          loading={loading}
+        />
+      )}
+    </div>
+  );
+}
+
+function VoiceAnalysisWorkspace({ voiceData, saveVoiceAccess, syncVoiceCalls, voiceRuns, openReport, activeVoiceReport, loading }) {
+  const access = voiceData?.access || {};
+  const summary = voiceData?.summary || {};
+  const calls = voiceData?.calls || [];
+  const syncRuns = voiceData?.sync_runs || [];
+  const categories = voiceData?.categories || {};
+  const [form, setForm] = useState({
+    bot_name: access.bot_name || "",
+    bot_id: access.bot_id || "",
+    ui_base_url: access.ui_base_url || "https://cloud.yellow.ai",
+    days_back: String(access.days_back || "7"),
+    range_mode: access.range_mode || "preset",
+    date_from: access.date_from || defaultDateFrom(access.days_back || 7),
+    date_to: access.date_to || localDateInputValue(),
+    api_key: "",
+    cookie: "",
+  });
+  const [selectedCallId, setSelectedCallId] = useState("");
+  const selectedCall = calls.find((call) => call.id === selectedCallId) || calls[0] || null;
+  useEffect(() => {
+    setForm((current) => ({
+      ...current,
+      bot_name: access.bot_name || current.bot_name || "",
+      bot_id: access.bot_id || current.bot_id || "",
+      ui_base_url: access.ui_base_url || current.ui_base_url || "https://cloud.yellow.ai",
+      days_back: String(access.days_back || current.days_back || "7"),
+      range_mode: access.range_mode || current.range_mode || "preset",
+      date_from: access.date_from || current.date_from || defaultDateFrom(access.days_back || current.days_back || 7),
+      date_to: access.date_to || current.date_to || localDateInputValue(),
+      api_key: "",
+      cookie: "",
+    }));
+  }, [access.project_id, access.bot_id, access.cookie_configured, access.api_key_configured, access.range_mode, access.date_from, access.date_to]);
+  useEffect(() => {
+    if (!selectedCallId && calls[0]?.id) setSelectedCallId(calls[0].id);
+  }, [calls[0]?.id, selectedCallId]);
+  const update = (key, value) => setForm((current) => ({ ...current, [key]: value }));
+  const usingCustomRange = form.range_mode === "custom";
+  const dateRangeReady = form.date_from && form.date_to && form.date_from <= form.date_to;
+  const syncCurrentRange = () => syncVoiceCalls({
+    ...form,
+    date_from: usingCustomRange ? form.date_from : "",
+    date_to: usingCustomRange ? form.date_to : "",
+    failed_only: false,
+  });
+  const categoryCounts = summary.category_counts || {};
+  return (
+    <div className="voiceWorkspace">
+      <section className="workPanel">
+        <PanelHeader title="Voice Bot Access" meta="YELLOW.AI CDR + MESSAGES" />
+        <div className="voiceAccessGrid">
+          <Field label="Voice bot name">
+            <input value={form.bot_name} onChange={(event) => update("bot_name", event.target.value)} placeholder="Kent RO Inbound" />
+          </Field>
+          <Field label="Voice bot ID">
+            <input value={form.bot_id} onChange={(event) => update("bot_id", event.target.value)} placeholder="x173..." />
+          </Field>
+          <Field label="Yellow.ai base URL">
+            <input value={form.ui_base_url} onChange={(event) => update("ui_base_url", event.target.value)} placeholder="https://cloud.yellow.ai" />
+          </Field>
+          <Field label="Platform API key">
+            <input type="password" value={form.api_key} onChange={(event) => update("api_key", event.target.value)} placeholder={access.api_key_configured ? "Saved. Leave blank to keep." : "Paste key for CDR/traces"} />
+          </Field>
+          <Field label="Cookie header">
+            <input type="password" value={form.cookie} onChange={(event) => update("cookie", event.target.value)} placeholder={access.cookie_configured ? "Saved. Leave blank to keep." : "Paste cookie for messages"} />
+          </Field>
+        </div>
+        <div className="voiceDateRangeBar">
+          <div>
+            <strong>Call-record range</strong>
+            <span>Fetch all CDR rows in the selected window, then classify failures locally.</span>
+          </div>
+          <div className="rangeModeToggle" aria-label="Voice sync range mode">
+            <button className={form.range_mode === "preset" ? "active" : ""} type="button" onClick={() => update("range_mode", "preset")}>Days back</button>
+            <button className={form.range_mode === "custom" ? "active" : ""} type="button" onClick={() => update("range_mode", "custom")}>Custom</button>
+          </div>
+          <Field label="Days back">
+            <input type="number" min="1" max="31" inputMode="numeric" disabled={usingCustomRange} value={form.days_back} onChange={(event) => update("days_back", event.target.value)} />
+          </Field>
+          <Field label="From">
+            <input type="date" disabled={!usingCustomRange} value={form.date_from} onChange={(event) => update("date_from", event.target.value)} />
+          </Field>
+          <Field label="To">
+            <input type="date" disabled={!usingCustomRange} value={form.date_to} onChange={(event) => update("date_to", event.target.value)} />
+          </Field>
+        </div>
+        <div className="voiceActionRow">
+          <div className="pillRow">
+            <Pill tone={access.api_key_configured ? "ok" : "warn"}>{access.api_key_configured ? "API key saved" : "API key missing"}</Pill>
+            <Pill tone={access.cookie_configured ? "ok" : "warn"}>{access.cookie_configured ? "Cookie saved" : "Cookie missing"}</Pill>
+          </div>
+          <div className="buttonRow">
+            <button className="secondaryButton" type="button" disabled={loading === "voice-access"} onClick={() => saveVoiceAccess(form)}>
+              <Icon name="save" /> Save access
+            </button>
+            <button type="button" disabled={loading === "voice-sync" || !form.bot_id.trim() || (usingCustomRange && !dateRangeReady)} onClick={syncCurrentRange}>
+              <Icon name={usingCustomRange ? "date_range" : "sync"} /> {loading === "voice-sync" ? "Syncing..." : usingCustomRange ? "Sync custom range" : `Sync last ${form.days_back || 7} days`}
+            </button>
+          </div>
+        </div>
       </section>
+
+      <section className="workPanel voiceOverviewPanel">
+        <PanelHeader title="Voice Failure Overview" meta="PROJECT-SCOPED ANALYSIS" />
+        <div className="metricGrid five">
+          <Metric label="Total calls" value={summary.total_calls || 0} />
+          <Metric label="Failed calls" value={summary.failed_calls || 0} />
+          <Metric label="Failure rate" value={`${summary.failure_rate || 0}%`} />
+          <Metric label="Categorized" value={summary.categorized || 0} />
+          <Metric label="Pending" value={summary.pending_deep_analysis || 0} />
+        </div>
+        <div className="voiceCategoryGrid">
+          {Object.entries(categories).filter(([code]) => code !== "pending_deep_analysis").map(([code, meta]) => (
+            <div className="voiceCategory" key={code}>
+              <strong>{meta.label}</strong>
+              <span>{categoryCounts[code] || 0}</span>
+              <p>{meta.description}</p>
+            </div>
+          ))}
+        </div>
+        <div className="voiceSyncStrip">
+          <Pill tone={summary.unidentified_turns ? "warn" : "ok"}>{summary.unidentified_turns || 0} unidentified turns</Pill>
+          <span>{summary.total_user_turns || 0} total user turns</span>
+          <span>Avg low confidence: {summary.avg_low_confidence ?? "-"}</span>
+        </div>
+      </section>
+
+      <div className="mainGrid voiceGrid">
+        <section className="workPanel voiceListPanel">
+          <PanelHeader title="Voice Calls" meta={`${calls.length} TOTAL / ${summary.failed_calls || 0} FAILED`} />
+          <div className="scrollRegion voiceCallScroll">
+            <VoiceCallList calls={calls} selectedCallId={selectedCall?.id} onSelect={setSelectedCallId} />
+          </div>
+        </section>
+        <section className="workPanel voiceDetailPanel">
+          <PanelHeader title="Call Detail" meta={selectedCall?.id || "NO CALL SELECTED"} />
+          <VoiceCallDetail call={selectedCall} />
+        </section>
+      </div>
+
+      <div className="mainGrid voiceBottomGrid">
+        <section className="workPanel voiceListPanel compact">
+          <PanelHeader title="Voice Runs" meta={`${voiceRuns.length} RECENT`} />
+          <div className="scrollRegion">
+            <RunList runs={voiceRuns} channel="voice" openReport={openReport} />
+          </div>
+        </section>
+        <section className="workPanel voiceDetailPanel compact">
+          <PanelHeader title="Latest Sync" meta={syncRuns[0]?.range_label || syncRuns[0]?.status || "NO SYNC"} />
+          {syncRuns[0] ? (
+            <div className="voiceSyncCard">
+              <strong>{syncRuns[0].created_at}</strong>
+              <p>{syncRuns[0].message}</p>
+              <div className="pillRow">
+                <Pill>{syncRuns[0].range_label || `${syncRuns[0].days_back || 7} days`}</Pill>
+                <Pill>{syncRuns[0].calls_pulled} pulled</Pill>
+                <Pill>{syncRuns[0].failed_calls} failed</Pill>
+                <Pill>{syncRuns[0].messages_loaded} with turns</Pill>
+                <Pill tone={syncRuns[0].pending_deep_analysis ? "warn" : "ok"}>{syncRuns[0].pending_deep_analysis} pending</Pill>
+              </div>
+            </div>
+          ) : (
+            <EmptyState title="No voice sync yet" text="Save voice access, then sync call records from Yellow.ai." />
+          )}
+        </section>
+      </div>
+
+      <section className="workPanel reportPanel">
+        <PanelHeader title="Voice Report" meta={activeVoiceReport?.id || "NO REPORT SELECTED"} />
+        <ReportView report={activeVoiceReport} channel="voice" />
+      </section>
+    </div>
+  );
+}
+
+function VoiceCallList({ calls, selectedCallId, onSelect }) {
+  if (!calls.length) return <EmptyState title="No voice calls yet" text="Sync call records from Yellow.ai to populate call analysis." />;
+  return (
+    <div className="cardList voiceCallList">
+      {calls.map((call) => (
+        <button className={cx("voiceCallItem", call.id === selectedCallId && "active")} type="button" key={call.id} onClick={() => onSelect(call.id)}>
+          <span>
+            <strong>{call.started_at || call.created_at || call.id}</strong>
+            <small>{call.from_number || "unknown caller"} - {call.hangup_reason || "no hangup reason"}</small>
+          </span>
+          <Pill tone={call.classification_status === "pending_deep_analysis" ? "warn" : call.issues?.length ? "warn" : "ok"}>
+            {call.primary_issue || call.classification_status || "ok"}
+          </Pill>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function VoiceCallDetail({ call }) {
+  if (!call) return <EmptyState title="No call selected" text="Select a voice call to inspect evidence." />;
+  const turns = call.turns || [];
+  return (
+    <div className="voiceCallDetail">
+      <div className="voiceCallMeta">
+        <Pill tone={call.severity === "High" ? "warn" : ""}>{call.severity || "Low"} severity</Pill>
+        <Pill>{call.call_duration_s || 0}s call</Pill>
+        <Pill>{call.bot_duration_s || 0}s bot</Pill>
+        <Pill>{call.language || "language unknown"}</Pill>
+      </div>
+      <p>{call.summary}</p>
+      <div className="contextBlock compactBlock">
+        <h3>Issue Evidence</h3>
+        {(call.issues || []).map((issue, index) => (
+          <div className="recommendation" key={`${issue.category}-${index}`}>
+            <strong>{issue.label || issue.category}</strong>
+            <p>{issue.evidence}</p>
+          </div>
+        ))}
+        {!call.issues?.length && <EmptyState title="No mapped issues" text={call.classification_status === "pending_deep_analysis" ? "Turn data is missing. Refresh cookie and re-sync messages/traces." : "No deterministic failure rule fired."} />}
+      </div>
+      <div className="contextBlock compactBlock">
+        <h3>Transcript</h3>
+        {turns.length ? (
+          <div className="transcriptList voiceTranscript">
+            {turns.slice(0, 30).map((turn, index) => (
+              <div className="transcriptTurn" key={`${turn.timestamp}-${index}`}>
+                <strong>{turn.speaker}</strong>
+                <span>{turn.text || "(empty)"}</span>
+                <small>{turn.confidence != null ? `conf ${turn.confidence}` : turn.message_type || ""} {turn.slug ? `- ${turn.slug}` : ""}</small>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <EmptyState title="No turn data" text="Yellow.ai messages were not available for this call. Refresh cookie and re-sync." />
+        )}
+      </div>
     </div>
   );
 }
@@ -1779,7 +2150,7 @@ function safeMarkdownHref(value) {
 }
 
 function SuiteList({ suites, channel, runSuite, loading }) {
-  const label = "chat";
+  const label = channel || "chat";
   if (!suites.length) return <EmptyState title={`No ${label} suites yet`} text={`Generate a ${label} suite from Bot Core Config.`} />;
   return (
     <div className="cardList">
@@ -1812,7 +2183,7 @@ function SuiteList({ suites, channel, runSuite, loading }) {
 }
 
 function RunList({ runs, channel, openReport }) {
-  const label = "chat";
+  const label = channel || "chat";
   if (!runs.length) return <EmptyState title={`No ${label} runs yet`} text={`Run a ${label} suite to create reports.`} />;
   return (
     <div className="cardList">
@@ -1834,7 +2205,7 @@ function RunList({ runs, channel, openReport }) {
 }
 
 function ReportView({ report, channel = "" }) {
-  const label = "chat";
+  const label = channel || "chat";
   if (!report) return <EmptyState title={`No ${label} report open`} text={`Run a ${label} suite or open a previous ${label} report.`} />;
   const visibleCases = (report.case_results || []).filter((item) => !channel || item.channel === channel);
   const visibleRecommendations = (report.yellow_ai_recommendations || []).filter((item) => !channel || item.channel === channel);

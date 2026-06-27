@@ -21,6 +21,7 @@ from backend import storage  # noqa: E402
 STATE_PATH = ROOT / "data" / "state.json"
 BRIDGE_SCHEMA_PATH = ROOT / "supabase" / "schema.sql"
 PRODUCT_SCHEMA_PATH = ROOT / "supabase" / "product_schema.sql"
+VOICE_SCHEMA_PATH = ROOT / "supabase" / "add_voice_analysis_tables.sql"
 
 
 def load_env_file(path: Path) -> None:
@@ -58,8 +59,8 @@ def status() -> None:
     print(json.dumps(storage.public_status(STATE_PATH), indent=2))
 
 
-def print_schema(product: bool = False) -> None:
-    path = PRODUCT_SCHEMA_PATH if product else BRIDGE_SCHEMA_PATH
+def print_schema(product: bool = False, voice: bool = False) -> None:
+    path = VOICE_SCHEMA_PATH if voice else PRODUCT_SCHEMA_PATH if product else BRIDGE_SCHEMA_PATH
     print(path.read_text(encoding="utf-8"))
 
 
@@ -78,6 +79,8 @@ def seed() -> None:
                 "suites": len(state.get("suites", [])),
                 "runs": len(state.get("runs", [])),
                 "reports": len(state.get("reports", [])),
+                "voice_calls": len(state.get("voice_calls", [])),
+                "voice_sync_runs": len(state.get("voice_sync_runs", [])),
             },
             indent=2,
         )
@@ -103,7 +106,7 @@ def main() -> None:
     load_env_file(ROOT / ".env.example")
 
     parser = argparse.ArgumentParser(description="Manage Bot QA Supabase state")
-    parser.add_argument("command", choices=["status", "schema", "product-schema", "seed", "pull"])
+    parser.add_argument("command", choices=["status", "schema", "product-schema", "voice-schema", "seed", "pull"])
     parser.add_argument("--output", default="", help="Output path for pull command")
     args = parser.parse_args()
 
@@ -113,6 +116,8 @@ def main() -> None:
         print_schema()
     elif args.command == "product-schema":
         print_schema(product=True)
+    elif args.command == "voice-schema":
+        print_schema(voice=True)
     elif args.command == "seed":
         seed()
     elif args.command == "pull":

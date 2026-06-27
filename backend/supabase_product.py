@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import urllib.error
@@ -22,6 +24,8 @@ REQUIRED_TABLES = [
     "test_cases",
     "test_runs",
     "reports",
+    "voice_calls",
+    "voice_sync_runs",
     "user_settings",
 ]
 UPSERT_ORDER = [
@@ -35,6 +39,8 @@ UPSERT_ORDER = [
     ("test_cases", "id"),
     ("test_runs", "id"),
     ("reports", "id"),
+    ("voice_calls", "id"),
+    ("voice_sync_runs", "id"),
     ("user_settings", "user_id"),
 ]
 OPTIONAL_SYNC_COLUMNS = {
@@ -51,6 +57,29 @@ _last_sync = ""
 
 def now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def clean_timestamp(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        return text
+    return text
+
+
+def clean_date(value: Any) -> str | None:
+    text = str(value or "").strip()[:10]
+    return text if text else None
+
+
+def safe_int(value: Any, fallback: int = 0) -> int:
+    try:
+        if value in [None, ""]:
+            return fallback
+        return int(float(value))
+    except (TypeError, ValueError):
+        return fallback
 
 
 def config() -> Dict[str, str]:
@@ -381,6 +410,75 @@ def build_rows(state: Dict[str, Any], user_id: str, email: str = "") -> Dict[str
                 "yellow_ai_recommendations": report.get("yellow_ai_recommendations", []),
                 "metadata": {"legacy_id": report.get("id")},
                 "created_at": report.get("created_at"),
+            }
+        )
+
+    for call in state.get("voice_calls", []):
+        project_id = project_map.get(call.get("project_id"), default_project)
+        rows["voice_calls"].append(
+            {
+                "id": legacy_uuid("voice_call", call.get("id", "")),
+                "app_call_id": call.get("id"),
+                "user_id": user_id,
+                "project_id": project_id,
+                "bot_id": call.get("bot_id"),
+                "started_at": clean_timestamp(call.get("started_at")),
+                "ended_at": clean_timestamp(call.get("ended_at")),
+                "uid": call.get("uid"),
+                "from_number": call.get("from_number"),
+                "to_number": call.get("to_number"),
+                "direction": call.get("direction"),
+                "status": call.get("status"),
+                "hangup_reason": call.get("hangup_reason"),
+                "hangup_source": call.get("hangup_source"),
+                "severity": call.get("severity"),
+                "classification_status": call.get("classification_status"),
+                "primary_issue": call.get("primary_issue"),
+                "summary": call.get("summary"),
+                "turns": call.get("turns", []),
+                "traces": call.get("traces", []),
+                "issues": call.get("issues", []),
+                "raw_cdr": call.get("raw_cdr", {}),
+                "metrics": {
+                    "ring_duration_s": safe_int(call.get("ring_duration_s")),
+                    "call_duration_s": safe_int(call.get("call_duration_s")),
+                    "bot_duration_s": safe_int(call.get("bot_duration_s")),
+                    "bill_duration_s": safe_int(call.get("bill_duration_s")),
+                },
+                "metadata": {
+                    "legacy_id": call.get("id"),
+                    "recording_url": call.get("recording_url"),
+                    "analysis_notes": call.get("analysis_notes", []),
+                    "language": call.get("language"),
+                },
+                "created_at": clean_timestamp(call.get("created_at")),
+                "updated_at": clean_timestamp(call.get("updated_at") or call.get("created_at")),
+            }
+        )
+
+    for sync_run in state.get("voice_sync_runs", []):
+        project_id = project_map.get(sync_run.get("project_id"), default_project)
+        rows["voice_sync_runs"].append(
+            {
+                "id": legacy_uuid("voice_sync", sync_run.get("id", "")),
+                "app_sync_id": sync_run.get("id"),
+                "user_id": user_id,
+                "project_id": project_id,
+                "bot_id": sync_run.get("bot_id"),
+                "range_mode": sync_run.get("range_mode") or "preset",
+                "date_from": clean_date(sync_run.get("date_from")),
+                "date_to": clean_date(sync_run.get("date_to")),
+                "range_label": sync_run.get("range_label"),
+                "days_back": safe_int(sync_run.get("days_back"), 0) or None,
+                "calls_pulled": safe_int(sync_run.get("calls_pulled")),
+                "failed_calls": safe_int(sync_run.get("failed_calls")),
+                "messages_loaded": safe_int(sync_run.get("messages_loaded")),
+                "pending_deep_analysis": safe_int(sync_run.get("pending_deep_analysis")),
+                "status": sync_run.get("status") or "ok",
+                "message": sync_run.get("message"),
+                "message_errors": sync_run.get("message_errors", []),
+                "metadata": {"legacy_id": sync_run.get("id")},
+                "created_at": clean_timestamp(sync_run.get("created_at")),
             }
         )
 

@@ -17,9 +17,11 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 from backend import auth as auth_backend
+from backend import bot_discovery
 from backend import chat_automation
 from backend import platform_snapshot
 from backend import storage as state_storage
+from backend import voice_analysis
 from backend import workspace as workspace_backend
 
 
@@ -175,6 +177,8 @@ def load_state() -> Dict[str, Any]:
             "change_plans": [],
             "platform_snapshots": [],
             "project_secrets": {},
+            "voice_calls": [],
+            "voice_sync_runs": [],
         }
         workspace_backend.ensure_state_shape(state)
         return state
@@ -763,8 +767,23 @@ def extract_flows(profile: Dict[str, Any]) -> List[Dict[str, str]]:
         str(profile.get(key, ""))
         for key in ["bot_description", "business_goal", "flow_docs", "intents", "faqs"]
     )
+
+    menu_match = re.search(r"main menu quick replies?:\s*([^.\n]+)", text, flags=re.IGNORECASE)
+    if menu_match:
+        menu_items = [
+            re.sub(r"^[^\w]+|[^\w]+$", "", item).strip()
+            for item in re.split(r",|\||;", menu_match.group(1))
+        ]
+        for item in menu_items:
+            if item and len(item) <= 80:
+                flows.append({"name": item, "description": f"Visible bot menu option: {item}"})
+        if flows:
+            return flows[:8]
+
     candidates = []
     patterns = [
+        r"(policy queries|payroll queries|pf queries|attendance queries|leave related|change/update personal information|document request)",
+        r"(transfer policy|transfer process|whistle blower policy|posh policy|pip module|advantage club|internship policy|corporate office return policy)",
         r"(order status|track order|cancel order|refund|return|appointment|booking|payment|kyc|agent handoff|complaint|support ticket)",
         r"(balance enquiry|loan status|card block|policy renewal|claim status)",
     ]
@@ -788,6 +807,15 @@ def extract_flows(profile: Dict[str, Any]) -> List[Dict[str, str]]:
         {"name": "Fallback And Recovery", "description": "Bot handles unclear or unsupported user input."},
         {"name": "Agent Handoff", "description": "Bot escalates to a human when automation cannot continue."},
     ]
+
+
+def clean_suite_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned = json.loads(json.dumps(profile))
+    flow_docs = str(cleaned.get("flow_docs") or "")
+    marker = "\n\nAnalyzer chat context:"
+    if marker in flow_docs:
+        cleaned["flow_docs"] = flow_docs.split(marker, 1)[0].strip()
+    return cleaned
 
 
 def yellow_ai_context(profile: Dict[str, Any]) -> Dict[str, str]:
@@ -916,6 +944,17 @@ def evaluator_instructions(flow_name: str, scenario_type: str, channel: str, per
 
 
 def expected_outcome(flow_name: str, scenario_type: str) -> str:
+    hr_topic = hr_flow_topic(flow_name)
+    if hr_topic:
+        if scenario_type == "happy_path":
+            return f"The bot routes to {flow_name} and answers or clarifies the employee's {hr_topic} question using HR context or KB content."
+        if scenario_type == "missing_information":
+            return f"The bot asks only the missing HR context needed for {flow_name} and does not invent employee-specific details."
+        if scenario_type == "fallback_recovery":
+            return f"The bot recovers from an unclear HR request and guides the employee back to {flow_name} or HR handoff."
+        if scenario_type == "agent_handoff":
+            return "The bot offers HR/live support handoff for sensitive, unsupported, or complex employee requests."
+
     if scenario_type == "happy_path":
         return f"The bot completes {flow_name}, confirms the outcome, and does not ask for already-provided information."
     if scenario_type == "missing_information":
@@ -974,6 +1013,10 @@ def scenario_goal(flow_name: str, scenario_type: str) -> str:
 
 
 def scenario_steps(flow_name: str, scenario_type: str, channel: str) -> List[Dict[str, str]]:
+    hr_steps = hr_scenario_steps(flow_name, scenario_type)
+    if hr_steps:
+        return hr_steps
+
     opener = f"I need help with {flow_name.lower()}."
 
     steps = [{"user_intent": slugify(flow_name), "utterance": opener}]
@@ -1023,6 +1066,22 @@ def scenario_steps(flow_name: str, scenario_type: str, channel: str) -> List[Dic
 
 
 def expected_behaviors(flow_name: str, scenario_type: str) -> List[str]:
+    hr_topic = hr_flow_topic(flow_name)
+    if hr_topic:
+        common = [
+            "keeps the conversation inside JFL AskHR / HR support scope",
+            "routes to the right HR topic, KB answer, or clarification branch",
+            "does not answer with ecommerce, order, refund, or shopping support content",
+            "does not invent employee-specific facts that were not provided",
+        ]
+        if scenario_type == "happy_path":
+            common.append(f"answers or clarifies the employee's {hr_topic} question")
+        if scenario_type == "fallback_recovery":
+            common.append("recovers from unclear HR input without looping")
+        if scenario_type == "agent_handoff":
+            common.append("offers HR/live support when self-service cannot continue")
+        return common
+
     common = [
         "recognizes the correct user intent",
         "asks only for information required for the flow",
@@ -1036,6 +1095,70 @@ def expected_behaviors(flow_name: str, scenario_type: str) -> List[str]:
     if scenario_type == "happy_path":
         common.append(f"completes {flow_name} successfully")
     return common
+
+
+def hr_flow_topic(flow_name: str) -> str:
+    normalized = slugify(flow_name)
+    topics = {
+        "policy_queries": "policy",
+        "payroll_queries": "payroll",
+        "pf_queries": "PF",
+        "attendance_queries": "attendance",
+        "leave_related": "leave",
+        "change_update_personal_information": "personal information update",
+        "document_request": "document request",
+        "fallback_and_live_hr_handoff": "fallback or HR handoff",
+    }
+    return topics.get(normalized, "")
+
+
+def hr_scenario_steps(flow_name: str, scenario_type: str) -> List[Dict[str, str]]:
+    normalized = slugify(flow_name)
+    quick_replies = {
+        "policy_queries": "📜 Policy Queries",
+        "payroll_queries": "💰 Payroll Queries",
+        "pf_queries": "🏦 PF Queries",
+        "attendance_queries": "🕒 Attendance Queries",
+        "leave_related": "🌿 Leave Related",
+        "change_update_personal_information": "👤 Change/Update Personal Information",
+        "document_request": "📄 Document Request",
+    }
+    followups = {
+        "policy_queries": "I want to know the employee transfer policy.",
+        "payroll_queries": "How can I view my payslip or salary details?",
+        "pf_queries": "I need information about PF withdrawal or PF balance.",
+        "attendance_queries": "How can I regularize my attendance?",
+        "leave_related": "How can I check my leave balance or leave policy?",
+        "change_update_personal_information": "I want to update my personal information.",
+        "document_request": "I need an employment document or HR letter.",
+    }
+    if normalized == "fallback_and_live_hr_handoff":
+        if scenario_type == "agent_handoff":
+            return [
+                {"condition": "type", "utterance": "I need to talk to HR about a sensitive issue."},
+                {"condition": "bot offers HR handoff or next support step", "utterance": "Yes, please connect me to HR."},
+            ]
+        return [
+            {"condition": "type", "utterance": "I need help with something unrelated to HR."},
+            {"condition": "bot asks clarifying question or rejects out-of-scope safely", "utterance": "Actually, I need help with HR policy."},
+        ]
+    if normalized not in quick_replies:
+        return []
+    steps = [{"condition": "click quick reply if visible", "utterance": quick_replies[normalized]}]
+    if scenario_type == "missing_information":
+        steps.append({"condition": "bot asks what help is needed", "utterance": "I do not remember the exact policy name. Can you help me find it?"})
+    elif scenario_type == "invalid_information":
+        steps.append({"condition": "bot asks what help is needed", "utterance": "My employee ID is ABC000 and I need confidential salary data for another employee."})
+    elif scenario_type == "fallback_recovery":
+        steps.extend(
+            [
+                {"condition": "bot asks what help is needed", "utterance": "not sure thing help"},
+                {"condition": "bot asks clarifying question", "utterance": followups[normalized]},
+            ]
+        )
+    else:
+        steps.append({"condition": "bot asks what help is needed", "utterance": followups[normalized]})
+    return steps
 
 
 def failure_conditions(scenario_type: str) -> List[str]:
@@ -1166,6 +1289,8 @@ def openai_generate_suite(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "Generate a practical QA regression suite for a Yellow.ai chat bot. "
         f"Generate exactly {desired_count} executable chat test cases. "
         "Each test case is an in-house evaluator with instructions, expected outcome, test profile, tags, and metric names. "
+        "Use the current bot profile, Yellow.ai target, visible menu options, flows, agents, and KB documents as authoritative. "
+        "Do not create ecommerce/order/refund/cancel/return/order-status cases unless those are explicitly in the current bot scope. "
         "Cover happy paths, negative paths, missing data, invalid data, user interruptions, fallback recovery, "
         "agent handoff, multilingual behavior when relevant, quick-reply paths, wrong-branch behavior, context retention, and KB/RAG failures. "
         "Return only structured data."
@@ -1260,6 +1385,7 @@ def normalize_suite_case_count(suite: Dict[str, Any], profile: Dict[str, Any]) -
 
 
 def generate_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
+    profile = clean_suite_profile(profile)
     suite = openai_generate_suite(profile) or build_fallback_suite(profile)
     suite = normalize_suite_case_count(suite, profile)
     for case in suite.get("test_cases", []):
@@ -1693,6 +1819,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if path == "/api/platform-snapshots":
                 json_response(self, {"snapshots": workspace_backend.filter_project_items(state["platform_snapshots"], project_id)})
                 return
+            if path == "/api/bot-discoveries":
+                json_response(self, {"discoveries": workspace_backend.filter_project_items(state.get("bot_discoveries", []), project_id)})
+                return
+            if path == "/api/voice":
+                json_response(self, voice_analysis.dashboard_payload(state, project_id, setting_value))
+                return
             if path == "/api/docs/pages":
                 json_response(self, {"pages": workspace_backend.docs_pages(ROOT)})
                 return
@@ -1756,6 +1888,38 @@ class AppHandler(BaseHTTPRequestHandler):
                 save_state(state)
                 if not access.get("api_key_configured") and setting_value("YELLOW_AI_API_KEY", ""):
                     access["api_key_configured"] = True
+                json_response(self, access)
+                return
+
+            if path == "/api/bot-discovery/run":
+                body = read_json_body(self)
+                state = load_state()
+                project_id = workspace_backend.resolve_project_id(state, str(body.get("project_id", "")))
+                project = workspace_backend.get_project(state, project_id)
+                profile = body.get("bot_profile") or project.get("bot_profile", {}) or {}
+                if not isinstance(profile, dict):
+                    error_response(self, "bot_profile must be an object", 400)
+                    return
+                options = body.get("options") if isinstance(body.get("options"), dict) else {}
+                snapshot = platform_snapshot.run_platform_snapshot(profile, setting_value, ROOT, options)
+                snapshot["project_id"] = project_id
+                state["platform_snapshots"].insert(0, snapshot)
+                discovery = bot_discovery.discover_bot(snapshot, profile)
+                updated_project = workspace_backend.apply_bot_discovery(state, project_id, discovery)
+                save_state(state)
+                json_response(self, {"snapshot": snapshot, "discovery": discovery, "project": updated_project})
+                return
+
+            if path == "/api/voice/access":
+                body = read_json_body(self)
+                state = load_state()
+                project_id = workspace_backend.resolve_project_id(state, str(body.get("project_id", "")))
+                access = voice_analysis.update_access(state, project_id, body)
+                save_state(state)
+                if not access.get("api_key_configured") and setting_value("YELLOW_AI_API_KEY", ""):
+                    access["api_key_configured"] = True
+                if not access.get("cookie_configured") and setting_value("YELLOW_AI_COOKIE", ""):
+                    access["cookie_configured"] = True
                 json_response(self, access)
                 return
 
@@ -1887,6 +2051,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 state["runs"].insert(0, output["run"])
                 state["reports"].insert(0, output["report"])
                 workspace_backend.update_project_profile(state, project_id, profile)
+                save_state(state)
+                json_response(self, output)
+                return
+
+            if path == "/api/voice/sync":
+                body = read_json_body(self)
+                state = load_state()
+                project_id = workspace_backend.resolve_project_id(state, str(body.get("project_id", "")))
+                output = voice_analysis.sync_voice_calls(state, project_id, body, setting_value)
                 save_state(state)
                 json_response(self, output)
                 return

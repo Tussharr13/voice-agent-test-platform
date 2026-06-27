@@ -68,7 +68,10 @@ def ensure_state_shape(state: Dict[str, Any]) -> bool:
         ("documents", []),
         ("change_plans", []),
         ("platform_snapshots", []),
+        ("bot_discoveries", []),
         ("project_secrets", {}),
+        ("voice_calls", []),
+        ("voice_sync_runs", []),
         ("projects", []),
         ("chats", []),
     ]:
@@ -99,7 +102,7 @@ def ensure_state_shape(state: Dict[str, Any]) -> bool:
             project["name"] = DEFAULT_PROJECT_NAME
             changed = True
 
-    for collection in ["suites", "runs", "reports", "documents", "change_plans", "platform_snapshots"]:
+    for collection in ["suites", "runs", "reports", "documents", "change_plans", "platform_snapshots", "bot_discoveries", "voice_calls", "voice_sync_runs"]:
         for item in state.get(collection, []):
             if "project_id" not in item:
                 item["project_id"] = default_project_id
@@ -173,6 +176,29 @@ def update_project_profile(state: Dict[str, Any], project_id: str, profile: Dict
     project["bot_profile"] = profile
     project["yellow_ai_target"] = yellow_ai_target(profile)
     project["updated_at"] = now_iso()
+
+
+def apply_bot_discovery(state: Dict[str, Any], project_id: str, discovery: Dict[str, Any]) -> Dict[str, Any]:
+    project = get_project(state, project_id)
+    discovery["project_id"] = project["id"]
+    profile = dict(project.get("bot_profile", {}))
+    for key, value in discovery.get("profile_patch", {}).items():
+        if value not in ["", [], {}]:
+            profile[key] = value
+    normalize_bot_profile(profile)
+    project["bot_profile"] = profile
+    project["yellow_ai_target"] = yellow_ai_target(profile)
+    project["bot_discovery"] = {
+        "id": discovery.get("id", ""),
+        "created_at": discovery.get("created_at", ""),
+        "summary": discovery.get("summary", ""),
+        "snapshot_id": discovery.get("snapshot_id", ""),
+        "recommended_tests": discovery.get("recommended_tests", []),
+    }
+    project["updated_at"] = now_iso()
+    state.setdefault("bot_discoveries", []).insert(0, discovery)
+    state["bot_discoveries"] = state["bot_discoveries"][:20]
+    return project
 
 
 def create_project(state: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -505,12 +531,14 @@ def openai_chat_response(
     system_prompt = (
         "You are the in-house Bot QA Analyzer for Yellow.ai chat agents. "
         "Be practical, direct, and project-aware. Use the provided project context, documents, suites, reports, platform snapshots, and Yellow.ai V3 rubric. "
+        "This phase is read-only: diagnose, recommend, and test, but do not claim you edited Yellow.ai Studio or changed any bot configuration. "
         "For report analysis, do not stop at a summary. For every failed or review case, identify: the exact failed user turn, expected vs actual behavior, "
         "the most likely Yellow.ai artifact type and candidate page from platform_snapshot evidence, the likely configuration failure, the exact fix to make, "
         "and the regression test to rerun. Cite snapshot IDs/page labels/URLs when present. If snapshot evidence is missing or does not expose the needed "
         "agent/workflow/KB/tool details, say exactly which Studio page or artifact must be captured next. Do not give generic advice like 'review routing' "
         "unless you also name the specific route, trigger, workflow step, KB answer, or fallback branch suggested by the report and snapshot evidence. "
-        "You may propose tests, reports, and approval-gated Yellow.ai changes, but you must not claim external Yellow.ai execution happened."
+        "Use yellow_ai_specialist_brief before writing any root-cause answer. You may propose tests and exact recommended Yellow.ai changes, "
+        "but edit execution and publishing are out of scope right now."
         f" {failure_diagnosis.analyzer_failure_prompt()}"
     )
     if mode == "docs":
@@ -581,7 +609,9 @@ def build_chat_context(
     requested_report_ids = report_ids_for_chat(chat)
     context: Dict[str, Any] = {
         "analysis_contract": [
+            "Current product scope: read-only Yellow.ai QA agent. Diagnose, recommend, and test. Do not edit Yellow.ai.",
             "Use platform_snapshots and failure_debug_map before giving recommendations.",
+            "Use yellow_ai_specialist_brief as the first source of truth for what to do and where to inspect.",
             "Use failure_investigation_packets first when present; they are pre-built root-cause packets from report transcript and platform snapshot evidence.",
             "Rank evidence in this order: failed transcript turn, report expected-vs-actual, exact active agent/step/function/API snapshot, then broad inventory pages. Broad inventory pages alone are weak evidence.",
             "Respect ruled_out_artifacts from failure_investigation_packets; do not recommend those artifacts unless the transcript or snapshot explicitly contradicts the packet.",
@@ -589,6 +619,7 @@ def build_chat_context(
             "If the snapshot does not expose enough details, state the exact missing artifact/page instead of giving generic guidance.",
         ],
         "failure_response_format": failure_diagnosis.failure_response_format(),
+        "yellow_ai_specialist_brief": failure_diagnosis.build_readonly_specialist_brief(project, reports[:3], snapshots),
         "requested_report_ids": requested_report_ids,
         "reports": [
             report_context(report)
@@ -1034,6 +1065,10 @@ def compact_transcript(transcript: Any) -> List[Dict[str, Any]]:
                 "expected_text": str(turn.get("expected_text", ""))[:1200],
                 "expected_buttons": turn.get("expected_buttons", []),
                 "action": turn.get("action"),
+                "confidence": turn.get("confidence"),
+                "message_type": turn.get("message_type"),
+                "stt_language": turn.get("stt_language"),
+                "slug": str(turn.get("slug", ""))[:200],
                 "latency_seconds": turn.get("latency_seconds"),
                 "timestamp": turn.get("timestamp"),
             }
@@ -1096,6 +1131,16 @@ def docs_pages(root: Path) -> List[Dict[str, str]]:
             "body": (
                 "Chat tests run through Playwright against the Yellow.ai web widget. Reports preserve expected vs actual replies, "
                 "quick-reply actions, transcripts, DOM evidence, and failure cards that map issues to routing, workflow/API, KB, or conversation design."
+            ),
+        },
+        {
+            "id": "read-only-specialist-agent",
+            "title": "Read-Only Yellow.ai Specialist Agent",
+            "category": "Analyzer",
+            "body": (
+                "The Analyzer is currently scoped as a read-only Yellow.ai QA agent: diagnose, recommend, and test, but do not edit. "
+                "It should pinpoint failed turns, likely Yellow.ai artifact locations, root causes, exact recommended fixes, regression tests, "
+                "and missing evidence pages/logs. Studio editing and publishing belong to a future approval-gated executor."
             ),
         },
         {

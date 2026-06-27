@@ -166,6 +166,57 @@ create table if not exists public.reports (
   created_at timestamptz not null default now()
 );
 
+create table if not exists public.voice_calls (
+  id uuid primary key default gen_random_uuid(),
+  app_call_id text,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
+  bot_id text,
+  started_at timestamptz,
+  ended_at timestamptz,
+  uid text,
+  from_number text,
+  to_number text,
+  direction text,
+  status text,
+  hangup_reason text,
+  hangup_source text,
+  severity text,
+  classification_status text,
+  primary_issue text,
+  summary text,
+  turns jsonb not null default '[]'::jsonb,
+  traces jsonb not null default '[]'::jsonb,
+  issues jsonb not null default '[]'::jsonb,
+  raw_cdr jsonb not null default '{}'::jsonb,
+  metrics jsonb not null default '{}'::jsonb,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists public.voice_sync_runs (
+  id uuid primary key default gen_random_uuid(),
+  app_sync_id text,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  project_id uuid not null references public.projects(id) on delete cascade,
+  bot_id text,
+  range_mode text not null default 'preset',
+  date_from date,
+  date_to date,
+  range_label text,
+  days_back integer,
+  calls_pulled integer not null default 0,
+  failed_calls integer not null default 0,
+  messages_loaded integer not null default 0,
+  pending_deep_analysis integer not null default 0,
+  status text not null default 'ok',
+  message text,
+  message_errors jsonb not null default '[]'::jsonb,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists public.user_settings (
   user_id uuid primary key references auth.users(id) on delete cascade,
   settings jsonb not null default '{}'::jsonb,
@@ -198,6 +249,12 @@ create index if not exists test_runs_app_run_id_idx on public.test_runs(app_run_
 create index if not exists test_runs_app_report_id_idx on public.test_runs(app_report_id);
 create index if not exists reports_app_report_id_idx on public.reports(app_report_id);
 create index if not exists reports_app_run_id_idx on public.reports(app_run_id);
+create unique index if not exists voice_calls_user_app_call_idx on public.voice_calls(user_id, app_call_id);
+create index if not exists voice_calls_user_project_idx on public.voice_calls(user_id, project_id, started_at desc);
+create index if not exists voice_calls_project_status_idx on public.voice_calls(project_id, classification_status);
+create index if not exists voice_calls_primary_issue_idx on public.voice_calls(primary_issue);
+create unique index if not exists voice_sync_runs_user_app_sync_idx on public.voice_sync_runs(user_id, app_sync_id);
+create index if not exists voice_sync_runs_user_project_idx on public.voice_sync_runs(user_id, project_id, created_at desc);
 
 create or replace function public.set_updated_at()
 returns trigger
@@ -239,6 +296,10 @@ begin
     create trigger test_cases_set_updated_at before update on public.test_cases
     for each row execute function public.set_updated_at();
   end if;
+  if not exists (select 1 from pg_trigger where tgname = 'voice_calls_set_updated_at') then
+    create trigger voice_calls_set_updated_at before update on public.voice_calls
+    for each row execute function public.set_updated_at();
+  end if;
   if not exists (select 1 from pg_trigger where tgname = 'user_settings_set_updated_at') then
     create trigger user_settings_set_updated_at before update on public.user_settings
     for each row execute function public.set_updated_at();
@@ -256,6 +317,8 @@ alter table public.test_suites enable row level security;
 alter table public.test_cases enable row level security;
 alter table public.test_runs enable row level security;
 alter table public.reports enable row level security;
+alter table public.voice_calls enable row level security;
+alter table public.voice_sync_runs enable row level security;
 alter table public.user_settings enable row level security;
 
 do $$
@@ -295,6 +358,12 @@ begin
   end if;
   if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'reports' and policyname = 'reports_all_own') then
     create policy reports_all_own on public.reports for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+  end if;
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'voice_calls' and policyname = 'voice_calls_all_own') then
+    create policy voice_calls_all_own on public.voice_calls for all using (user_id = auth.uid()) with check (user_id = auth.uid());
+  end if;
+  if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'voice_sync_runs' and policyname = 'voice_sync_runs_all_own') then
+    create policy voice_sync_runs_all_own on public.voice_sync_runs for all using (user_id = auth.uid()) with check (user_id = auth.uid());
   end if;
   if not exists (select 1 from pg_policies where schemaname = 'public' and tablename = 'user_settings' and policyname = 'user_settings_all_own') then
     create policy user_settings_all_own on public.user_settings for all using (user_id = auth.uid()) with check (user_id = auth.uid());

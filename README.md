@@ -1,12 +1,13 @@
 # Yellow.ai Chat QA Workbench
 
-Local MVP for Yellow.ai chat testing, failure analysis, and debugging acceleration.
+Local MVP for Yellow.ai chat testing, voice call analysis, failure analysis, and debugging acceleration.
 
 ## What This Builds
 
 - AI-generated chat test ideas for bot flows.
 - Coverage matrix across flows, scenario types, and personas.
 - Real Playwright web-widget chat automation.
+- Yellow.ai voice call observability: failed CDR sync, message/turn fetch when a cookie is available, deterministic failure categories, and voice reports.
 - Read-only Yellow.ai platform snapshots for automated Analyzer context.
 - Deterministic and AI-ready evaluation metrics.
 - Reports with Yellow.ai-style failure analysis and improvement recommendations.
@@ -22,7 +23,7 @@ The dashboard is now a project-based workbench:
 
 - **Analyzer**: real OpenAI-backed project chat with docs, suites, reports, and Yellow.ai target context.
 - **Platform snapshots**: read-only Playwright capture of Yellow.ai Studio/Automation text, relevant links, and network metadata from a logged-in session for automated Analyzer context.
-- **Testing**: bot profile, chat script execution, scoring, failure analysis, and reports.
+- **Testing**: Chat Testing for Playwright web-widget regression, plus Voice Call Analysis for Yellow.ai failed-call CDR/message analysis.
 - **Docs**: handbook/search/docs assistant plus project document upload and change plans.
 
 Existing suites, runs, reports, documents, and plans are attached to a default `Yellow.ai Chat QA Workbench` project on first load.
@@ -32,6 +33,7 @@ Existing suites, runs, reports, documents, and plans are attached to a default `
 - `app.py` keeps the local HTTP server, testing logic, document extraction, scoring, and API routing.
 - `backend/storage.py` owns local JSON or Supabase persistence.
 - `backend/workspace.py` owns project migration, project/chat state, docs pages/search, and OpenAI analyzer/docs chat context.
+- `backend/voice_analysis.py` owns Yellow.ai voice CDR/message ingestion, deterministic voice failure categorization, and voice report generation.
 - `static/index.html`, `static/App.jsx`, and `static/styles.css` own the React browser workbench UI.
 
 ## Run
@@ -69,8 +71,8 @@ Use `.env.example` as the integration checklist for OpenAI, Supabase, and Yellow
 ## Supabase Persistence
 
 By default, workspace state is saved to `data/state.json`. To persist projects,
-chats, documents, suites, runs, reports, and settings in Supabase instead, create
-one JSONB-backed state table in Supabase SQL editor.
+chats, documents, suites, runs, reports, voice call evidence, and settings in
+Supabase instead, create one JSONB-backed state table in Supabase SQL editor.
 
 Print the schema:
 
@@ -112,6 +114,13 @@ python3 scripts/supabase_product.py users --save-first
 python3 scripts/supabase_product.py seed --source supabase
 ```
 
+If the product tables already exist and you only need the latest voice analysis
+tables, print and run the smaller migration:
+
+```bash
+python3 scripts/supabase_state.py voice-schema
+```
+
 If there are no Auth users yet, create a local dev owner first:
 
 ```bash
@@ -132,6 +141,8 @@ into `app_run_id`, `app_report_id`, and `app_suite_id` columns when the optional
 sync falls back to the older JSON metadata fields.
 Analyzer-prepared goal-driven test briefs can also be mirrored on projects after
 running `supabase/add_goal_brief_columns.sql`.
+Voice calls and voice sync history are mirrored after running
+`supabase/add_voice_analysis_tables.sql`.
 
 ## Login And Signup
 
@@ -177,6 +188,16 @@ The current executable path is real web-widget chat automation:
 - Playwright opens the configured Yellow.ai liveBot/widget URL.
 - The runner clicks quick replies, types user messages, waits for fresh bot replies, and captures transcript evidence.
 - Reports map expected-vs-actual failures to likely Yellow.ai debugging areas.
+
+Voice Call Analysis is integrated in the **Testing** tab:
+
+- Save project-level voice bot ID, Yellow.ai base URL, API key, and optional cookie.
+- Sync all voice call records from Yellow.ai CDR for the selected range, then classify failures locally.
+- Classify failures into Intent Mismatch, Speech Recognition, Flow Interruption, Voice Synthesis, Early Termination, or Pending Deep Analysis.
+- Fetch voice message turns when a valid Yellow.ai cookie is available.
+- Produce normal `report_...` artifacts with `channel: voice`, so Analyzer can attach and reason over them like chat reports.
+
+If the cookie is missing or expired, CDR-level failures still appear, but Bot Failure/Bot response failure calls remain `Pending Deep Analysis` until message turns/traces are available.
 
 Generated suites are planning artifacts. Use **Testing > Chat Testing > Chat Automation** for real execution.
 

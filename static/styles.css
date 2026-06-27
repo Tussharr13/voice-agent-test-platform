@@ -1150,6 +1150,20 @@ textarea:focus {
   gap: 10px;
 }
 
+.specialistModeBlock {
+  padding: 10px;
+  border: 1px solid #f0d36a;
+  border-radius: 6px;
+  background: #fff8db;
+}
+
+.specialistModeBlock p {
+  margin: 0;
+  color: #5d616b;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .chatAccessPrompt {
   display: grid;
   gap: 12px;
@@ -1272,6 +1286,289 @@ textarea:focus {
 .recommendation p,
 .recommendation small,
 .caseRow span {
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.voiceWorkspace {
+  display: grid;
+  gap: 16px;
+}
+
+.voiceAccessGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+.voiceDateRangeBar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) auto minmax(110px, 130px) minmax(150px, 180px) minmax(150px, 180px);
+  align-items: end;
+  gap: 12px;
+  margin: 0 16px 16px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcfe;
+}
+
+.voiceDateRangeBar > div:first-child {
+  display: grid;
+  gap: 4px;
+  align-self: center;
+  min-width: 0;
+}
+
+.voiceDateRangeBar strong {
+  color: #222831;
+  font-size: 13px;
+}
+
+.voiceDateRangeBar span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.rangeModeToggle {
+  display: inline-flex;
+  align-self: end;
+  overflow: hidden;
+  min-height: 36px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.rangeModeToggle button {
+  min-height: 34px;
+  border: 0;
+  border-radius: 0;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.rangeModeToggle button + button {
+  border-left: 1px solid var(--line);
+}
+
+.rangeModeToggle button.active {
+  background: var(--yellow);
+  color: #241d00;
+}
+
+.voiceDateRangeBar input:disabled {
+  background: #eef1f5;
+  color: #8a93a1;
+  cursor: not-allowed;
+}
+
+.voiceActionRow,
+.voiceSyncStrip,
+.voiceCallMeta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 16px 16px;
+}
+
+.voiceOverviewPanel {
+  overflow: hidden;
+}
+
+.voiceOverviewPanel .metricGrid {
+  gap: 12px;
+  padding: 16px 18px 12px;
+}
+
+.voiceOverviewPanel .metricCard {
+  min-height: 78px;
+  padding: 14px 16px;
+  background: #f7f8fa;
+}
+
+.voiceSyncStrip {
+  justify-content: flex-start;
+  margin: 0 18px 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.voiceCategoryGrid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+  padding: 0 18px 14px;
+}
+
+.voiceCategory {
+  display: grid;
+  gap: 6px;
+  min-height: 116px;
+  align-content: start;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.voiceCategory strong {
+  color: #222831;
+  font-size: 13px;
+}
+
+.voiceCategory span {
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 800;
+  color: #241d00;
+}
+
+.voiceCategory p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.voiceGrid {
+  grid-template-columns: minmax(320px, 0.72fr) minmax(0, 1.28fr);
+}
+
+.voiceBottomGrid {
+  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1fr);
+}
+
+.voiceListPanel,
+.voiceDetailPanel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.voiceListPanel {
+  max-height: 420px;
+}
+
+.voiceListPanel.compact,
+.voiceDetailPanel.compact {
+  max-height: 300px;
+}
+
+.voiceListPanel .scrollRegion {
+  max-height: 340px;
+}
+
+.voiceListPanel.compact .scrollRegion {
+  max-height: 220px;
+}
+
+.voiceListPanel .emptyState,
+.voiceDetailPanel > .emptyState,
+.voiceDetailPanel.compact > .emptyState,
+.reportPanel > .emptyState {
+  margin: 14px 16px 16px;
+}
+
+.voiceCallScroll {
+  max-height: 340px;
+}
+
+.voiceCallList {
+  gap: 8px;
+}
+
+.voiceCallItem {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  width: 100%;
+  min-height: 74px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+  color: #202630;
+  text-align: left;
+}
+
+.voiceCallItem:hover,
+.voiceCallItem.active {
+  border-color: var(--yellow-line);
+  background: #fff9d8;
+}
+
+.voiceCallItem span {
+  min-width: 0;
+}
+
+.voiceCallItem strong,
+.voiceCallItem small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceCallItem small {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.voiceCallDetail {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.voiceCallMeta {
+  justify-content: flex-start;
+  padding: 0;
+}
+
+.voiceCallDetail > p {
+  margin: 0;
+  color: #313843;
+  line-height: 1.5;
+}
+
+.compactBlock {
+  margin: 0;
+}
+
+.voiceTranscript {
+  max-height: 360px;
+  overflow: auto;
+}
+
+.transcriptTurn small {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.voiceSyncCard {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+}
+
+.voiceSyncCard p {
+  margin: 0;
   color: var(--muted);
   line-height: 1.45;
 }
@@ -1608,8 +1905,16 @@ textarea:focus {
 @media (max-width: 1200px) {
   .analyzerGrid,
   .testingGrid,
+  .voiceGrid,
+  .voiceBottomGrid,
   .docsGrid {
     grid-template-columns: 1fr;
+  }
+
+  .voiceAccessGrid,
+  .voiceDateRangeBar,
+  .voiceCategoryGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .analyzerGrid {
@@ -1635,6 +1940,23 @@ textarea:focus {
 
   .docGrid {
     grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .voiceAccessGrid,
+  .voiceDateRangeBar,
+  .voiceCategoryGrid,
+  .testingModeSummary {
+    grid-template-columns: 1fr;
+  }
+
+  .voiceActionRow {
+    align-items: stretch;
+  }
+
+  .voiceActionRow .buttonRow {
+    width: 100%;
   }
 }
 
