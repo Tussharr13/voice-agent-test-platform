@@ -250,6 +250,76 @@ function Icon({ name, filled = false }) {
   );
 }
 
+function useClickOutside(ref, handler) {
+  useEffect(() => {
+    function onPointer(event) {
+      if (!ref.current || ref.current.contains(event.target)) return;
+      handler();
+    }
+    document.addEventListener("mousedown", onPointer);
+    return () => document.removeEventListener("mousedown", onPointer);
+  }, [ref, handler]);
+}
+
+const LOADING_MESSAGES = {
+  logout: "Signing out",
+  project: "Creating project",
+  "docs-chat": "Sending message",
+  "analyzer-chat": "Sending message",
+  "save-profile": "Saving profile",
+  "generate-suite": "Generating suite",
+  "chat-automation": "Running chat automation",
+  "goal-chat-automation": "Running goal-driven test",
+  "platform-snapshot": "Capturing platform snapshot",
+  "bot-discovery": "Discovering bot",
+  "yellow-access": "Saving Yellow.ai access",
+  "voice-access": "Saving voice access",
+  "voice-sync": "Syncing voice calls",
+  report: "Loading report",
+  upload: "Uploading document",
+  "analyze-doc": "Analyzing document",
+  "approve-plan": "Approving plan",
+  "goal-brief": "Preparing test brief",
+  "delete-chat": "Deleting chat",
+};
+
+function formatLoadingMessage(label) {
+  if (!label) return "Working";
+  if (LOADING_MESSAGES[label]) return LOADING_MESSAGES[label];
+  if (label.startsWith("run-")) return "Running suite";
+  return label.replace(/-/g, " ");
+}
+
+function ToastStack({ toasts, onDismiss }) {
+  if (!toasts.length) return null;
+  return (
+    <div className="toastStack" aria-live="polite">
+      {toasts.map((toast) => (
+        <div key={toast.id} className={cx("toast", toast.tone)} role="status">
+          {toast.tone === "loading" && <span className="toastSpinner" aria-hidden="true" />}
+          <span className="toastMessage">{toast.message}</span>
+          {toast.tone !== "loading" && (
+            <button className="toastDismiss" type="button" aria-label="Dismiss" onClick={() => onDismiss(toast.id)}>
+              <Icon name="close" />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LoadingStatus({ loading }) {
+  if (!loading) return null;
+  return (
+    <div className="loadingStatus" role="status" aria-live="polite">
+      <span className="toastSpinner" aria-hidden="true" />
+      <strong>Loading...</strong>
+      <span>{formatLoadingMessage(loading)}</span>
+    </div>
+  );
+}
+
 function App() {
   const [auth, setAuth] = useState({ loading: true, authenticated: false, user: null });
   const [activeTab, setActiveTab] = useState("analyzer");
@@ -271,7 +341,34 @@ function App() {
   const [latestReport, setLatestReport] = useState(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState("");
-  const [error, setError] = useState("");
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+  const [chatToDelete, setChatToDelete] = useState(null);
+  const [toasts, setToasts] = useState([]);
+  const toastTimers = useRef({});
+
+  function addToast(message, tone = "info") {
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setToasts((current) => [...current, { id, message, tone }]);
+    if (tone !== "loading") {
+      toastTimers.current[id] = window.setTimeout(() => {
+        setToasts((current) => current.filter((item) => item.id !== id));
+        delete toastTimers.current[id];
+      }, tone === "error" ? 7000 : 4500);
+    }
+    return id;
+  }
+
+  function dismissToast(id) {
+    if (toastTimers.current[id]) {
+      window.clearTimeout(toastTimers.current[id]);
+      delete toastTimers.current[id];
+    }
+    setToasts((current) => current.filter((item) => item.id !== id));
+  }
+
+  function notifyError(message) {
+    if (message) addToast(message, "error");
+  }
 
   const activeProject = useMemo(
     () => projects.find((project) => project.id === activeProjectId) || projects[0] || null,
@@ -343,8 +440,8 @@ function App() {
 
     const nextProject = nextProjects.find((project) => project.id === nextProjectId) || nextProjects[0];
     setProfile({ ...emptyProfile, ...(nextProject?.bot_profile || {}) });
-    const preferredAnalyzerId = options.activeChatId || activeChatId;
-    const preferredDocsChatId = options.activeDocsChatId || activeDocsChatId;
+    const preferredAnalyzerId = Object.prototype.hasOwnProperty.call(options, "activeChatId") ? options.activeChatId : activeChatId;
+    const preferredDocsChatId = Object.prototype.hasOwnProperty.call(options, "activeDocsChatId") ? options.activeDocsChatId : activeDocsChatId;
     const analyzer =
       (chatsPayload.chats || []).find((chat) => chat.id === preferredAnalyzerId && chat.mode === "analyzer") ||
       (chatsPayload.chats || []).find((chat) => chat.mode === "analyzer");
@@ -366,13 +463,12 @@ function App() {
       })
       .catch((err) => {
         setAuth({ loading: false, authenticated: false, user: null });
-        setError(err.message);
+        addToast(err.message, "error");
       });
   }, []);
 
   async function handleAuthenticated(session) {
     setAuth({ loading: false, authenticated: true, user: session.user });
-    setError("");
     await refresh({ keepReport: false });
   }
 
@@ -386,28 +482,45 @@ function App() {
 
   async function guarded(label, fn) {
     setLoading(label);
-    setError("");
+    const loadingToastId = addToast(formatLoadingMessage(label), "loading");
     try {
       await fn();
+      dismissToast(loadingToastId);
     } catch (err) {
-      setError(err.message);
+      dismissToast(loadingToastId);
+      addToast(err.message, "error");
     } finally {
       setLoading("");
     }
   }
 
-  async function createProject() {
-    const name = window.prompt("Project name", "New bot project");
+  async function createProject(payload) {
+    const name = String(payload?.name || "").trim();
     if (!name) return;
     await guarded("project", async () => {
       const project = await api("/api/projects", {
         method: "POST",
-        body: JSON.stringify({ name, bot_profile: profile }),
+        body: JSON.stringify({ name, description: payload?.description || "", bot_profile: profile }),
       });
       setActiveProjectId(project.id);
       setActiveChatId("");
       setActiveDocsChatId("");
+      setProjectDialogOpen(false);
       await refresh({ projectId: project.id, keepReport: false });
+    });
+  }
+
+  async function deleteChat(chat) {
+    if (!chat?.id) return;
+    await guarded("delete-chat", async () => {
+      await api(projectQuery(`/api/chats/${chat.id}`, activeProjectId), { method: "DELETE" });
+      setChatToDelete(null);
+      setChats((current) => current.filter((item) => item.id !== chat.id));
+      await refresh({
+        keepReport: true,
+        activeChatId: chat.mode === "analyzer" && chat.id === activeChatId ? "" : activeChatId,
+        activeDocsChatId: chat.mode === "docs" && chat.id === activeDocsChatId ? "" : activeDocsChatId,
+      });
     });
   }
 
@@ -648,7 +761,7 @@ function App() {
   async function attachReport(reportId) {
     const selectedReportId = reportId || runs[0]?.report_id;
     if (!selectedReportId) {
-      setError("Run a suite first so there is a report to attach.");
+      notifyError("Run a suite first so there is a report to attach.");
       return;
     }
     await sendMessage(
@@ -683,30 +796,34 @@ function App() {
   return (
     <div className="appShell">
       <Sidebar
-        user={auth.user}
         activeTab={activeTab}
         setActiveTab={setActiveTab}
-        projects={projects}
-        activeProjectId={activeProjectId}
-        setProject={(projectId) => {
-          setActiveProjectId(projectId);
-          setActiveChatId("");
-          setActiveDocsChatId("");
-          refresh({ projectId, keepReport: false }).catch((err) => setError(err.message));
-        }}
         chats={chats}
         activeChatId={activeTab === "docs" ? activeDocsChatId : activeChatId}
         setChat={(chat) => (chat.mode === "docs" ? setActiveDocsChatId(chat.id) : setActiveChatId(chat.id))}
         search={search}
         setSearch={setSearch}
-        createProject={createProject}
-        createChat={() => createChat(activeTab === "docs" ? "docs" : "analyzer").catch((err) => setError(err.message))}
-        openSettings={() => document.querySelector("#settingsDialog")?.showModal()}
-        refresh={() => refresh({ keepReport: true }).catch((err) => setError(err.message))}
-        logout={logout}
+        createProject={() => setProjectDialogOpen(true)}
+        createChat={() => createChat(activeTab === "docs" ? "docs" : "analyzer").catch((err) => notifyError(err.message))}
+        deleteChat={(chat) => setChatToDelete(chat)}
       />
       <main className="workspace">
-        <TopBar activeTab={activeTab} activeProject={activeProject} loading={loading} error={error} />
+        <TopBar
+          activeTab={activeTab}
+          activeProject={activeProject}
+          projects={projects}
+          onProjectChange={(projectId) => {
+            setActiveProjectId(projectId);
+            setActiveChatId("");
+            setActiveDocsChatId("");
+            refresh({ projectId, keepReport: false }).catch((err) => notifyError(err.message));
+          }}
+          user={auth.user}
+          onOpenSettings={() => document.querySelector("#settingsDialog")?.showModal()}
+          onRefresh={() => refresh({ keepReport: true }).catch((err) => notifyError(err.message))}
+          onLogout={logout}
+        />
+        <LoadingStatus loading={loading} />
         {activeTab === "analyzer" && (
           <AnalyzerTab
             chat={analyzerChat}
@@ -760,12 +877,28 @@ function App() {
             activeProjectId={activeProjectId}
             chat={docsChat}
             sendMessage={(content) => sendMessage("docs", content)}
-            createDocsChat={() => createChat("docs").catch((err) => setError(err.message))}
+            createDocsChat={() => createChat("docs").catch((err) => notifyError(err.message))}
             loading={loading}
           />
         )}
       </main>
-      <SettingsDialog config={config} setConfig={setConfig} setError={setError} />
+      {projectDialogOpen && (
+        <NewProjectDialog
+          loading={loading}
+          onClose={() => setProjectDialogOpen(false)}
+          onCreate={(payload) => createProject(payload)}
+        />
+      )}
+      {chatToDelete && (
+        <DeleteChatDialog
+          chat={chatToDelete}
+          loading={loading}
+          onClose={() => setChatToDelete(null)}
+          onDelete={() => deleteChat(chatToDelete)}
+        />
+      )}
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
+      <SettingsDialog config={config} setConfig={setConfig} onError={notifyError} />
     </div>
   );
 }
@@ -858,6 +991,7 @@ function AuthScreen({ onAuthenticated }) {
 }
 
 function Sidebar(props) {
+  const showChats = props.activeTab !== "testing";
   const mode = props.activeTab === "docs" ? "docs" : "analyzer";
   const filteredChats = props.chats
     .filter((chat) => chat.mode === mode)
@@ -868,19 +1002,16 @@ function Sidebar(props) {
         <div className="brandMark">QA</div>
         <div>
           <strong>QA Workbench</strong>
-          <span>V2.4.0</span>
         </div>
       </div>
       <button className="primarySideButton" type="button" onClick={props.createProject}>
         <Icon name="add" /> New project
       </button>
-      <button className="sideAction" type="button" onClick={props.createChat}>
-        <Icon name="chat" /> New chat
-      </button>
-      <label className="sideSearch">
-        Search
-        <input value={props.search} onChange={(event) => props.setSearch(event.target.value)} placeholder="Search chats" />
-      </label>
+      {showChats && (
+        <button className="sideAction" type="button" onClick={props.createChat}>
+          <Icon name="chat" /> New chat
+        </button>
+      )}
       <nav className="sideNav">
         {[
           ["analyzer", "analytics", "Analyzer"],
@@ -892,48 +1023,32 @@ function Sidebar(props) {
           </button>
         ))}
       </nav>
-      <SectionTitle label="Projects" />
-      <div className="sideList projectList">
-        {props.projects.map((project) => (
-          <button
-            key={project.id}
-            className={cx("sideListItem", project.id === props.activeProjectId && "active")}
-            type="button"
-            onClick={() => props.setProject(project.id)}
-          >
-            <span>{project.name}</span>
-            <small>{project.yellow_ai_target?.platform || "local"}</small>
-          </button>
-        ))}
-      </div>
-      <SectionTitle label="Chats" />
-      <div className="sideList chatList">
-        {filteredChats.length ? (
-          filteredChats.map((chat) => (
-            <button key={chat.id} className={cx("sideListItem", chat.id === props.activeChatId && "active")} type="button" onClick={() => props.setChat(chat)}>
-              <span>{chat.title}</span>
-              <small>{chat.mode}</small>
-            </button>
-          ))
-        ) : (
-          <div className="sideEmpty">No {mode} chats yet</div>
-        )}
-      </div>
-      <div className="sidebarBottom">
-        <div className="userBadge">
-          <Icon name="account_circle" />
-          <span>{props.user?.email || "Signed in"}</span>
-        </div>
-        <button className="sideAction ghost" type="button" onClick={props.openSettings}>
-          <Icon name="settings" /> Settings
-        </button>
-        <button className="sideAction ghost" type="button" onClick={props.refresh}>
-          <Icon name="refresh" /> Refresh
-        </button>
-        <button className="sideAction ghost" type="button" onClick={props.logout}>
-          <Icon name="logout" /> Logout
-        </button>
-      </div>
+      {showChats && (
+        <>
+          <label className="sideSearch">
+            Search
+            <input value={props.search} onChange={(event) => props.setSearch(event.target.value)} placeholder="Search chats" />
+          </label>
+          <SectionTitle label="Chats" />
+          <div className="sideList chatList">
+            {filteredChats.length ? (
+              filteredChats.map((chat) => (
+                <div key={chat.id} className={cx("chatListItem", chat.id === props.activeChatId && "active")}>
+                  <button className="chatSelectButton" type="button" onClick={() => props.setChat(chat)}>
+                    <span>{chat.title}</span>
+                    <small>{chat.mode}</small>
+                  </button>
+                  <button className="chatDeleteButton" type="button" aria-label={`Delete ${chat.title}`} title="Delete chat" onClick={() => props.deleteChat(chat)}>
+                    <Icon name="delete" />
+                  </button>
+                </div>
+              ))
+            ) : (
+              <div className="sideEmpty">No {mode} chats yet</div>
+            )}
+          </div>
+        </>
+      )}
     </aside>
   );
 }
@@ -942,51 +1057,176 @@ function SectionTitle({ label }) {
   return <div className="sideSectionHeader">{label}</div>;
 }
 
-function TopBar({ activeTab, activeProject, loading, error }) {
+function TopBar({ activeTab, activeProject, projects, onProjectChange, user, onOpenSettings, onRefresh, onLogout }) {
+  const titles = {
+    analyzer: "Analyzer",
+    testing: "Testing",
+    docs: "Docs",
+  };
   return (
     <header className="topBar">
-      <div>
-        <h1>{activeTab === "analyzer" ? "QA Analyzer" : activeTab === "testing" ? "Test Execution Board" : "Documentation Hub"}</h1>
-        <p>{activeProject?.name || "Yellow.ai Chat QA Workbench"}</p>
+      <div className="topBarLead">
+        <h1>{titles[activeTab] || "Workbench"}</h1>
+        <ProjectSwitcher projects={projects} activeProject={activeProject} onChange={onProjectChange} />
       </div>
-      <div className="topBarMeta">
-        {error && <span className="statusPill error">{error}</span>}
-        {loading && <span className="statusPill warn">Working</span>}
-        <span className="statusPill">Local MVP</span>
+      <div className="topBarActions">
+        <UserMenu user={user} onOpenSettings={onOpenSettings} onRefresh={onRefresh} onLogout={onLogout} />
       </div>
     </header>
+  );
+}
+
+function ProjectSwitcher({ projects, activeProject, onChange }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useClickOutside(ref, () => setOpen(false));
+  return (
+    <div className="dropdownAnchor projectSwitcher" ref={ref}>
+      <button className="projectSwitcherButton" type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open}>
+        <span className="projectSwitcherName">{activeProject?.name || "Select project"}</span>
+        <Icon name="expand_more" />
+      </button>
+      {open && (
+        <div className="dropdownMenu projectSwitcherMenu" role="menu">
+          {projects.map((project) => (
+            <button
+              key={project.id}
+              className={cx("dropdownItem", project.id === activeProject?.id && "active")}
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                onChange(project.id);
+                setOpen(false);
+              }}
+            >
+              <span>{project.name}</span>
+              <small>{project.yellow_ai_target?.platform || "local"}</small>
+            </button>
+          ))}
+          {!projects.length && <div className="dropdownEmpty">No projects yet</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UserMenu({ user, onOpenSettings, onRefresh, onLogout }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useClickOutside(ref, () => setOpen(false));
+  const initials = (user?.email || "U").slice(0, 1).toUpperCase();
+  return (
+    <div className="dropdownAnchor userMenu" ref={ref}>
+      <button className="userMenuButton" type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open} aria-label="Account menu">
+        <span className="userAvatar">{initials}</span>
+      </button>
+      {open && (
+        <div className="dropdownMenu userMenuPanel" role="menu">
+          <div className="userMenuHeader">
+            <strong>{user?.email || "Signed in"}</strong>
+          </div>
+          <button className="dropdownItem" type="button" role="menuitem" onClick={() => { onOpenSettings(); setOpen(false); }}>
+            <Icon name="settings" /> Settings
+          </button>
+          <button className="dropdownItem" type="button" role="menuitem" onClick={() => { onRefresh(); setOpen(false); }}>
+            <Icon name="refresh" /> Refresh
+          </button>
+          <button className="dropdownItem danger" type="button" role="menuitem" onClick={() => { onLogout(); setOpen(false); }}>
+            <Icon name="logout" /> Logout
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActionsMenu({ items, loading }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useClickOutside(ref, () => setOpen(false));
+  return (
+    <div className="dropdownAnchor actionsMenu" ref={ref}>
+      <button className="secondaryButton" type="button" onClick={() => setOpen((current) => !current)} aria-expanded={open}>
+        <Icon name="bolt" /> Actions
+      </button>
+      {open && (
+        <div className="dropdownMenu actionsMenuPanel" role="menu">
+          {items.map((item) => (
+            <button
+              key={item.id}
+              className="dropdownItem"
+              type="button"
+              role="menuitem"
+              disabled={item.disabled}
+              onClick={() => {
+                item.onClick();
+                setOpen(false);
+              }}
+            >
+              <Icon name={item.icon} />
+              <span>{item.label}</span>
+            </button>
+          ))}
+          {loading && <div className="dropdownHint">Working on {formatLoadingMessage(loading)}...</div>}
+        </div>
+      )}
+    </div>
   );
 }
 
 function AnalyzerTab({ chat, sendMessage, createSuite, attachReport, prepareGoalBrief, activeProject, documents, changePlans, suites, runs, platformSnapshots, yellowAccess, saveYellowAccess, runBotDiscovery, runPlatformSnapshot, config, loading }) {
   const [message, setMessage] = useState("");
   const [showReportPicker, setShowReportPicker] = useState(false);
+  const [contextOpen, setContextOpen] = useState(false);
   function chooseReport(reportId) {
     setShowReportPicker(false);
     attachReport(reportId);
   }
+  const actionItems = [
+    {
+      id: "pinpoint",
+      icon: "troubleshoot",
+      label: "Pinpoint report",
+      onClick: () => setShowReportPicker(true),
+    },
+    {
+      id: "brief",
+      icon: "assignment",
+      label: "Prepare test brief",
+      disabled: loading === "goal-brief",
+      onClick: prepareGoalBrief,
+    },
+    {
+      id: "suite",
+      icon: "science",
+      label: "Create suite",
+      onClick: createSuite,
+    },
+    {
+      id: "connect",
+      icon: "login",
+      label: "Connect session",
+      disabled: loading === "platform-snapshot",
+      onClick: () => runPlatformSnapshot({ headless: false, wait_for_login: true }),
+    },
+    {
+      id: "snapshot",
+      icon: "travel_explore",
+      label: "Run snapshot",
+      disabled: loading === "platform-snapshot",
+      onClick: () => runPlatformSnapshot(),
+    },
+  ];
   return (
     <div className="mainGrid analyzerGrid">
       <section className="workPanel chatPanel">
         <PanelHeader
-          title="Analyzer Session"
-          meta="SESSION ID: PROJECT-CONTEXT"
+          title="Analyzer"
           actions={
             <>
-              <button className="secondaryButton" type="button" onClick={() => setShowReportPicker(true)}>
-                <Icon name="troubleshoot" /> Pinpoint report
-              </button>
-              <button className="secondaryButton" type="button" disabled={loading === "goal-brief"} onClick={prepareGoalBrief}>
-                <Icon name="assignment" /> Prepare test brief
-              </button>
-              <button className="secondaryButton" type="button" onClick={createSuite}>
-                <Icon name="science" /> Create suite
-              </button>
-              <button className="secondaryButton" type="button" disabled={loading === "platform-snapshot"} onClick={() => runPlatformSnapshot({ headless: false, wait_for_login: true })}>
-                <Icon name="login" /> Connect session
-              </button>
-              <button className="secondaryButton" type="button" disabled={loading === "platform-snapshot"} onClick={() => runPlatformSnapshot()}>
-                <Icon name="travel_explore" /> Run snapshot
+              <ActionsMenu items={actionItems} loading={loading} />
+              <button className="iconButton contextToggle" type="button" aria-label="Open project context" onClick={() => setContextOpen(true)}>
+                <Icon name="info" />
               </button>
             </>
           }
@@ -1016,10 +1256,114 @@ function AnalyzerTab({ chat, sendMessage, createSuite, attachReport, prepareGoal
           />
         )}
       </section>
-      <aside className="workPanel contextPanel">
-        <PanelHeader title="Project Context" meta="ATTACHED KNOWLEDGE" />
-        <ContextPanel activeProject={activeProject} documents={documents} changePlans={changePlans} suites={suites} runs={runs} platformSnapshots={platformSnapshots} yellowAccess={yellowAccess} config={config} />
-      </aside>
+      {contextOpen && (
+        <>
+          <div className="drawerBackdrop" role="presentation" onMouseDown={() => setContextOpen(false)} />
+          <aside className="contextDrawer" role="dialog" aria-modal="true" aria-labelledby="context-drawer-title">
+            <div className="drawerHeader">
+              <div>
+                <h2 id="context-drawer-title">Project Context</h2>
+                <p>Attached knowledge and integration health</p>
+              </div>
+              <button className="iconButton" type="button" aria-label="Close project context" onClick={() => setContextOpen(false)}>
+                <Icon name="close" />
+              </button>
+            </div>
+            <div className="drawerBody">
+              <ContextPanel activeProject={activeProject} documents={documents} changePlans={changePlans} suites={suites} runs={runs} platformSnapshots={platformSnapshots} yellowAccess={yellowAccess} config={config} />
+            </div>
+          </aside>
+        </>
+      )}
+    </div>
+  );
+}
+
+function NewProjectDialog({ loading, onCreate, onClose }) {
+  const [name, setName] = useState("New bot project");
+  const [description, setDescription] = useState("");
+  const busy = loading === "project";
+  function submit(event) {
+    event.preventDefault();
+    const cleanName = name.trim();
+    if (!cleanName || busy) return;
+    onCreate({ name: cleanName, description: description.trim() });
+  }
+  return (
+    <div className="modalOverlay" role="presentation" onMouseDown={busy ? undefined : onClose}>
+      <section className="projectDialog" role="dialog" aria-modal="true" aria-labelledby="new-project-title" onMouseDown={(event) => event.stopPropagation()}>
+        <form onSubmit={submit}>
+          <div className="dialogHeader">
+            <div>
+              <h2 id="new-project-title">New Project</h2>
+              <p>Create a clean workspace for one Yellow.ai bot, its chats, tests, reports, and docs.</p>
+            </div>
+            <button className="iconButton" type="button" aria-label="Close new project dialog" disabled={busy} onClick={onClose}>
+              <Icon name="close" />
+            </button>
+          </div>
+          <div className="projectDialogBody">
+            <Field label="Project name">
+              <input value={name} onChange={(event) => setName(event.target.value)} autoFocus />
+            </Field>
+            <Field label="Description">
+              <textarea value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Optional note about this bot or testing scope" />
+            </Field>
+            {busy && (
+              <div className="dialogLoading" role="status">
+                <span className="toastSpinner" aria-hidden="true" />
+                Loading... Creating project
+              </div>
+            )}
+          </div>
+          <div className="dialogActions">
+            <button className="secondaryButton" type="button" disabled={busy} onClick={onClose}>Cancel</button>
+            <button type="submit" disabled={busy || !name.trim()}>
+              <Icon name="add" /> {busy ? "Creating..." : "Create project"}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function DeleteChatDialog({ chat, loading, onDelete, onClose }) {
+  const busy = loading === "delete-chat";
+  return (
+    <div className="modalOverlay" role="presentation" onMouseDown={busy ? undefined : onClose}>
+      <section className="confirmDialog" role="dialog" aria-modal="true" aria-labelledby="delete-chat-title" onMouseDown={(event) => event.stopPropagation()}>
+        <div className="dialogHeader">
+          <div>
+            <h2 id="delete-chat-title">Delete Chat</h2>
+            <p>This removes the chat from the current project. Test runs and reports stay untouched.</p>
+          </div>
+          <button className="iconButton" type="button" aria-label="Close delete chat dialog" disabled={busy} onClick={onClose}>
+            <Icon name="close" />
+          </button>
+        </div>
+        <div className="projectDialogBody">
+          <div className="deletePreview">
+            <Icon name="chat" />
+            <div>
+              <strong>{chat.title || "Untitled chat"}</strong>
+              <span>{chat.mode || "analyzer"} chat</span>
+            </div>
+          </div>
+          {busy && (
+            <div className="dialogLoading" role="status">
+              <span className="toastSpinner" aria-hidden="true" />
+              Loading... Deleting chat
+            </div>
+          )}
+        </div>
+        <div className="dialogActions">
+          <button className="secondaryButton" type="button" disabled={busy} onClick={onClose}>Cancel</button>
+          <button className="dangerButton" type="button" disabled={busy} onClick={onDelete}>
+            <Icon name="delete" /> {busy ? "Deleting..." : "Delete chat"}
+          </button>
+        </div>
+      </section>
     </div>
   );
 }
@@ -1194,16 +1538,6 @@ function ContextPanel({ activeProject, documents, changePlans, suites, runs, pla
         <Metric label="Suites" value={suites.length} />
         <Metric label="Snapshots" value={platformSnapshots.length} />
       </div>
-      <div className="contextBlock specialistModeBlock">
-        <h3>Analyzer Mode</h3>
-        <div className="pillRow">
-          <Pill tone="ok">Read-only</Pill>
-          <Pill>Diagnose</Pill>
-          <Pill>Recommend</Pill>
-          <Pill>Test</Pill>
-        </div>
-        <p>Analyzer can pinpoint Yellow.ai issues and suggest exact fixes, but it will not edit Studio, publish, or mutate production.</p>
-      </div>
       <div className="contextBlock">
         <h3>Yellow.ai Target</h3>
         <div className="pillRow">
@@ -1264,13 +1598,10 @@ function ContextPanel({ activeProject, documents, changePlans, suites, runs, pla
         )}
       </div>
       <div className="contextBlock">
-        <h3>Suggested Next Actions</h3>
+        <h3>Next steps</h3>
         <ul className="compactList">
           <li>{latestSnapshot ? `Use ${latestSnapshot.id} for failure root-cause analysis.` : "Run a platform snapshot to attach Studio context automatically."}</li>
-          <li>{botDiscovery?.id ? `Use discovered bot profile ${botDiscovery.id} for suite generation.` : "Run bot discovery after attaching Yellow.ai access."}</li>
           <li>{goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare a goal-driven test brief from Analyzer."}</li>
-          <li>{changePlans[0] ? `Review ${changePlans[0].id} from ${changePlans[0].document_name}` : "Upload a Yellow.ai guide, flow spec, or transcript if API access is incomplete."}</li>
-          <li>{suites[0] ? `Run or inspect ${suites[0].name}` : "Generate a first regression suite."}</li>
           <li>{runs[0] ? `Open latest report ${runs[0].report_id}` : "Run a real web-widget chat automation script."}</li>
         </ul>
       </div>
@@ -1349,7 +1680,7 @@ function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, r
   return (
     <div className="testingStack">
       <section className="workPanel testingModePanel">
-        <PanelHeader title="Testing Workspace" meta={testMode === "chat" ? "YELLOW.AI CHAT TESTING" : "YELLOW.AI VOICE ANALYSIS"} />
+        <PanelHeader title="Testing Workspace" />
         <div className="testingChannelTabs">
           <button className={testMode === "chat" ? "active" : ""} type="button" onClick={() => setTestMode("chat")}>
             <Icon name="chat" filled /> Chat Testing
@@ -1366,18 +1697,18 @@ function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, r
         <>
           <div className="mainGrid testingGrid">
             <section className="workPanel">
-              <PanelHeader title="Bot Core Config" meta="CHAT SUITE INPUTS" />
+              <PanelHeader title="Bot Core Config" />
               <BotCoreConfig
                 profile={profile}
                 setProfile={setProfile}
                 saveProfile={saveProfile}
-                generateSuite={() => generateSuite("chat")}
+                generateSuite={() => generateSuite(false)}
                 generateSuiteLabel="Generate Chat Suite"
                 loading={loading}
               />
             </section>
             <section className="workPanel">
-              <PanelHeader title="Run Chat Tests" meta="REAL WEB-WIDGET AUTOMATION" />
+              <PanelHeader title="Run Chat Tests" />
               <ChatAutomationPanel
                 profile={profile}
                 setProfile={setProfile}
@@ -1815,6 +2146,7 @@ function ChatAutomationPanel({ profile, setProfile, runChatAutomation, runGoalCh
 }
 
 function BotCoreConfig({ profile, setProfile, saveProfile, generateSuite, generateSuiteLabel = "Generate Test Suite", loading }) {
+  const [showSuiteRequest, setShowSuiteRequest] = useState(Boolean(profile.suite_request));
   const update = (key, value) => setProfile((current) => ({ ...current, [key]: value }));
   return (
     <div className="configForm">
@@ -1842,6 +2174,27 @@ function BotCoreConfig({ profile, setProfile, saveProfile, generateSuite, genera
       <Field label="Journeys / risks to cover">
         <textarea value={profile.flow_docs || ""} onChange={(event) => update("flow_docs", event.target.value)} />
       </Field>
+      <div className="suiteRequestToggleRow">
+        <button className="secondaryButton" type="button" onClick={() => setShowSuiteRequest((current) => !current)}>
+          <Icon name={showSuiteRequest ? "expand_less" : "tune"} /> {showSuiteRequest ? "Hide specific request" : "Specific suite request"}
+        </button>
+        {profile.suite_request && <Pill tone="ok">custom request active</Pill>}
+      </div>
+      {showSuiteRequest && (
+        <div className="suiteRequestPanel">
+          <Field label="What specific tests or suite do you need?">
+            <textarea
+              className="compactTextarea"
+              value={profile.suite_request || ""}
+              onChange={(event) => update("suite_request", event.target.value)}
+              placeholder="Example: Create 8 installation booking cases focused on language persistence, pincode validation, confirmation after address capture, fallback recovery, and positive closure."
+            />
+          </Field>
+          <p className="fieldHint">
+            This request is used only for suite generation. The bot profile and discovered Yellow.ai context still stay as the source of truth.
+          </p>
+        </div>
+      )}
       <div className="buttonRow">
         <button type="button" onClick={generateSuite} disabled={loading === "generate-suite"}>
           <Icon name="play_arrow" /> {generateSuiteLabel}
@@ -1869,7 +2222,7 @@ function DocsTab({ docsPages, documents, changePlans, uploadDocument, analyzeDoc
   return (
     <div className="docsStack">
       <section className="workPanel">
-        <PanelHeader title="Knowledge Base" meta="HANDBOOK + PROJECT DOCS" />
+        <PanelHeader title="Knowledge Base" />
         <form className="searchHero" onSubmit={searchDocs}>
           <Icon name="search" />
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search V3 routing, RAG testing, provider setup..." />
@@ -1898,7 +2251,7 @@ function DocsTab({ docsPages, documents, changePlans, uploadDocument, analyzeDoc
         </section>
       </div>
       <section className="workPanel">
-        <PanelHeader title="Docs Assistant" meta="SOURCE-GROUNDED HELP" actions={<button className="secondaryButton" type="button" onClick={createDocsChat}>New docs chat</button>} />
+        <PanelHeader title="Docs Assistant" actions={<button className="secondaryButton" type="button" onClick={createDocsChat}>New docs chat</button>} />
         <ChatMessages chat={chat} empty="Ask about this tool, Yellow.ai V2/V3, RAG, chat testing, or setup." compact />
         <form
           className="chatComposer"
@@ -1921,7 +2274,7 @@ function PanelHeader({ title, meta, actions }) {
     <div className="panelHeader">
       <div>
         <h2>{title}</h2>
-        {meta && <span>{meta}</span>}
+        {meta && <span className="panelMeta">{meta}</span>}
       </div>
       {actions && <div className="buttonRow">{actions}</div>}
     </div>
@@ -2333,7 +2686,7 @@ function EmptyState({ title, text }) {
   );
 }
 
-function SettingsDialog({ config, setConfig, setError }) {
+function SettingsDialog({ config, setConfig, onError }) {
   const [values, setValues] = useState({});
   const visibleKeys = ["DEFAULT_BOT_NAME", "DEFAULT_CHAT_ENDPOINT", "OPENAI_API_KEY", "OPENAI_MODEL"];
   useEffect(() => {
@@ -2356,7 +2709,7 @@ function SettingsDialog({ config, setConfig, setError }) {
       setConfig(await api("/api/config", { method: "POST", body: JSON.stringify({ settings: payload }) }));
       document.querySelector("#settingsDialog")?.close();
     } catch (err) {
-      setError(err.message);
+      onError(err.message);
     }
   }
   return (

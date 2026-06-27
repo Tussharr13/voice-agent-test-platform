@@ -150,6 +150,51 @@ var BotQAApp = (() => {
   function Icon({ name, filled = false }) {
     return /* @__PURE__ */ React.createElement("span", { className: "material-symbols-outlined", style: { fontVariationSettings: `'FILL' ${filled ? 1 : 0}` } }, name);
   }
+  function useClickOutside(ref, handler) {
+    useEffect(() => {
+      function onPointer(event) {
+        if (!ref.current || ref.current.contains(event.target)) return;
+        handler();
+      }
+      document.addEventListener("mousedown", onPointer);
+      return () => document.removeEventListener("mousedown", onPointer);
+    }, [ref, handler]);
+  }
+  var LOADING_MESSAGES = {
+    logout: "Signing out",
+    project: "Creating project",
+    "docs-chat": "Sending message",
+    "analyzer-chat": "Sending message",
+    "save-profile": "Saving profile",
+    "generate-suite": "Generating suite",
+    "chat-automation": "Running chat automation",
+    "goal-chat-automation": "Running goal-driven test",
+    "platform-snapshot": "Capturing platform snapshot",
+    "bot-discovery": "Discovering bot",
+    "yellow-access": "Saving Yellow.ai access",
+    "voice-access": "Saving voice access",
+    "voice-sync": "Syncing voice calls",
+    report: "Loading report",
+    upload: "Uploading document",
+    "analyze-doc": "Analyzing document",
+    "approve-plan": "Approving plan",
+    "goal-brief": "Preparing test brief",
+    "delete-chat": "Deleting chat"
+  };
+  function formatLoadingMessage(label) {
+    if (!label) return "Working";
+    if (LOADING_MESSAGES[label]) return LOADING_MESSAGES[label];
+    if (label.startsWith("run-")) return "Running suite";
+    return label.replace(/-/g, " ");
+  }
+  function ToastStack({ toasts, onDismiss }) {
+    if (!toasts.length) return null;
+    return /* @__PURE__ */ React.createElement("div", { className: "toastStack", "aria-live": "polite" }, toasts.map((toast) => /* @__PURE__ */ React.createElement("div", { key: toast.id, className: cx("toast", toast.tone), role: "status" }, toast.tone === "loading" && /* @__PURE__ */ React.createElement("span", { className: "toastSpinner", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("span", { className: "toastMessage" }, toast.message), toast.tone !== "loading" && /* @__PURE__ */ React.createElement("button", { className: "toastDismiss", type: "button", "aria-label": "Dismiss", onClick: () => onDismiss(toast.id) }, /* @__PURE__ */ React.createElement(Icon, { name: "close" })))));
+  }
+  function LoadingStatus({ loading }) {
+    if (!loading) return null;
+    return /* @__PURE__ */ React.createElement("div", { className: "loadingStatus", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("span", { className: "toastSpinner", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("strong", null, "Loading..."), /* @__PURE__ */ React.createElement("span", null, formatLoadingMessage(loading)));
+  }
   function App() {
     const [auth, setAuth] = useState({ loading: true, authenticated: false, user: null });
     const [activeTab, setActiveTab] = useState("analyzer");
@@ -171,7 +216,31 @@ var BotQAApp = (() => {
     const [latestReport, setLatestReport] = useState(null);
     const [search, setSearch] = useState("");
     const [loading, setLoading] = useState("");
-    const [error, setError] = useState("");
+    const [projectDialogOpen, setProjectDialogOpen] = useState(false);
+    const [chatToDelete, setChatToDelete] = useState(null);
+    const [toasts, setToasts] = useState([]);
+    const toastTimers = useRef({});
+    function addToast(message, tone = "info") {
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      setToasts((current) => [...current, { id, message, tone }]);
+      if (tone !== "loading") {
+        toastTimers.current[id] = window.setTimeout(() => {
+          setToasts((current) => current.filter((item) => item.id !== id));
+          delete toastTimers.current[id];
+        }, tone === "error" ? 7e3 : 4500);
+      }
+      return id;
+    }
+    function dismissToast(id) {
+      if (toastTimers.current[id]) {
+        window.clearTimeout(toastTimers.current[id]);
+        delete toastTimers.current[id];
+      }
+      setToasts((current) => current.filter((item) => item.id !== id));
+    }
+    function notifyError(message) {
+      if (message) addToast(message, "error");
+    }
     const activeProject = useMemo(
       () => projects.find((project) => project.id === activeProjectId) || projects[0] || null,
       [projects, activeProjectId]
@@ -235,8 +304,8 @@ var BotQAApp = (() => {
       setConfig(configPayload);
       const nextProject = nextProjects.find((project) => project.id === nextProjectId) || nextProjects[0];
       setProfile({ ...emptyProfile, ...nextProject?.bot_profile || {} });
-      const preferredAnalyzerId = options.activeChatId || activeChatId;
-      const preferredDocsChatId = options.activeDocsChatId || activeDocsChatId;
+      const preferredAnalyzerId = Object.prototype.hasOwnProperty.call(options, "activeChatId") ? options.activeChatId : activeChatId;
+      const preferredDocsChatId = Object.prototype.hasOwnProperty.call(options, "activeDocsChatId") ? options.activeDocsChatId : activeDocsChatId;
       const analyzer = (chatsPayload.chats || []).find((chat) => chat.id === preferredAnalyzerId && chat.mode === "analyzer") || (chatsPayload.chats || []).find((chat) => chat.mode === "analyzer");
       const docs = (chatsPayload.chats || []).find((chat) => chat.id === preferredDocsChatId && chat.mode === "docs") || (chatsPayload.chats || []).find((chat) => chat.mode === "docs");
       setActiveChatId(analyzer?.id || "");
@@ -251,12 +320,11 @@ var BotQAApp = (() => {
         }
       }).catch((err) => {
         setAuth({ loading: false, authenticated: false, user: null });
-        setError(err.message);
+        addToast(err.message, "error");
       });
     }, []);
     async function handleAuthenticated(session) {
       setAuth({ loading: false, authenticated: true, user: session.user });
-      setError("");
       await refresh({ keepReport: false });
     }
     async function logout() {
@@ -268,27 +336,43 @@ var BotQAApp = (() => {
     }
     async function guarded(label, fn) {
       setLoading(label);
-      setError("");
+      const loadingToastId = addToast(formatLoadingMessage(label), "loading");
       try {
         await fn();
+        dismissToast(loadingToastId);
       } catch (err) {
-        setError(err.message);
+        dismissToast(loadingToastId);
+        addToast(err.message, "error");
       } finally {
         setLoading("");
       }
     }
-    async function createProject() {
-      const name = window.prompt("Project name", "New bot project");
+    async function createProject(payload) {
+      const name = String(payload?.name || "").trim();
       if (!name) return;
       await guarded("project", async () => {
         const project = await api("/api/projects", {
           method: "POST",
-          body: JSON.stringify({ name, bot_profile: profile })
+          body: JSON.stringify({ name, description: payload?.description || "", bot_profile: profile })
         });
         setActiveProjectId(project.id);
         setActiveChatId("");
         setActiveDocsChatId("");
+        setProjectDialogOpen(false);
         await refresh({ projectId: project.id, keepReport: false });
+      });
+    }
+    async function deleteChat(chat) {
+      if (!chat?.id) return;
+      await guarded("delete-chat", async () => {
+        await api(projectQuery(`/api/chats/${chat.id}`, activeProjectId), { method: "DELETE" });
+        setChatToDelete(null);
+        setChats((current) => current.filter((item) => item.id !== chat.id));
+        await refresh({
+          keepReport: true,
+          activeChatId: chat.mode === "analyzer" && chat.id === activeChatId ? "" : activeChatId,
+          activeDocsChatId: chat.mode === "docs" && chat.id === activeDocsChatId ? "" : activeDocsChatId
+        });
       });
     }
     async function createChat(mode) {
@@ -507,7 +591,7 @@ var BotQAApp = (() => {
     async function attachReport(reportId) {
       const selectedReportId = reportId || runs[0]?.report_id;
       if (!selectedReportId) {
-        setError("Run a suite first so there is a report to attach.");
+        notifyError("Run a suite first so there is a report to attach.");
         return;
       }
       await sendMessage(
@@ -538,29 +622,35 @@ var BotQAApp = (() => {
     return /* @__PURE__ */ React.createElement("div", { className: "appShell" }, /* @__PURE__ */ React.createElement(
       Sidebar,
       {
-        user: auth.user,
         activeTab,
         setActiveTab,
-        projects,
-        activeProjectId,
-        setProject: (projectId) => {
-          setActiveProjectId(projectId);
-          setActiveChatId("");
-          setActiveDocsChatId("");
-          refresh({ projectId, keepReport: false }).catch((err) => setError(err.message));
-        },
         chats,
         activeChatId: activeTab === "docs" ? activeDocsChatId : activeChatId,
         setChat: (chat) => chat.mode === "docs" ? setActiveDocsChatId(chat.id) : setActiveChatId(chat.id),
         search,
         setSearch,
-        createProject,
-        createChat: () => createChat(activeTab === "docs" ? "docs" : "analyzer").catch((err) => setError(err.message)),
-        openSettings: () => document.querySelector("#settingsDialog")?.showModal(),
-        refresh: () => refresh({ keepReport: true }).catch((err) => setError(err.message)),
-        logout
+        createProject: () => setProjectDialogOpen(true),
+        createChat: () => createChat(activeTab === "docs" ? "docs" : "analyzer").catch((err) => notifyError(err.message)),
+        deleteChat: (chat) => setChatToDelete(chat)
       }
-    ), /* @__PURE__ */ React.createElement("main", { className: "workspace" }, /* @__PURE__ */ React.createElement(TopBar, { activeTab, activeProject, loading, error }), activeTab === "analyzer" && /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement("main", { className: "workspace" }, /* @__PURE__ */ React.createElement(
+      TopBar,
+      {
+        activeTab,
+        activeProject,
+        projects,
+        onProjectChange: (projectId) => {
+          setActiveProjectId(projectId);
+          setActiveChatId("");
+          setActiveDocsChatId("");
+          refresh({ projectId, keepReport: false }).catch((err) => notifyError(err.message));
+        },
+        user: auth.user,
+        onOpenSettings: () => document.querySelector("#settingsDialog")?.showModal(),
+        onRefresh: () => refresh({ keepReport: true }).catch((err) => notifyError(err.message)),
+        onLogout: logout
+      }
+    ), /* @__PURE__ */ React.createElement(LoadingStatus, { loading }), activeTab === "analyzer" && /* @__PURE__ */ React.createElement(
       AnalyzerTab,
       {
         chat: analyzerChat,
@@ -614,10 +704,25 @@ var BotQAApp = (() => {
         activeProjectId,
         chat: docsChat,
         sendMessage: (content) => sendMessage("docs", content),
-        createDocsChat: () => createChat("docs").catch((err) => setError(err.message)),
+        createDocsChat: () => createChat("docs").catch((err) => notifyError(err.message)),
         loading
       }
-    )), /* @__PURE__ */ React.createElement(SettingsDialog, { config, setConfig, setError }));
+    )), projectDialogOpen && /* @__PURE__ */ React.createElement(
+      NewProjectDialog,
+      {
+        loading,
+        onClose: () => setProjectDialogOpen(false),
+        onCreate: (payload) => createProject(payload)
+      }
+    ), chatToDelete && /* @__PURE__ */ React.createElement(
+      DeleteChatDialog,
+      {
+        chat: chatToDelete,
+        loading,
+        onClose: () => setChatToDelete(null),
+        onDelete: () => deleteChat(chatToDelete)
+      }
+    ), /* @__PURE__ */ React.createElement(ToastStack, { toasts, onDismiss: dismissToast }), /* @__PURE__ */ React.createElement(SettingsDialog, { config, setConfig, onError: notifyError }));
   }
   function SplashScreen() {
     return /* @__PURE__ */ React.createElement("main", { className: "authShell" }, /* @__PURE__ */ React.createElement("section", { className: "authCard compact" }, /* @__PURE__ */ React.createElement("div", { className: "authBrand" }, /* @__PURE__ */ React.createElement("div", { className: "brandMark" }, "QA"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", null, "QA Workbench"), /* @__PURE__ */ React.createElement("p", null, "Loading workspace")))));
@@ -657,43 +762,131 @@ var BotQAApp = (() => {
     )), error && /* @__PURE__ */ React.createElement("div", { className: "authError" }, error), /* @__PURE__ */ React.createElement("button", { type: "submit", disabled: busy }, busy ? "Please wait" : mode === "signup" ? "Create account" : "Login"))));
   }
   function Sidebar(props) {
+    const showChats = props.activeTab !== "testing";
     const mode = props.activeTab === "docs" ? "docs" : "analyzer";
     const filteredChats = props.chats.filter((chat) => chat.mode === mode).filter((chat) => !props.search.trim() || chat.title.toLowerCase().includes(props.search.trim().toLowerCase()));
-    return /* @__PURE__ */ React.createElement("aside", { className: "sidebar" }, /* @__PURE__ */ React.createElement("div", { className: "sideBrand" }, /* @__PURE__ */ React.createElement("div", { className: "brandMark" }, "QA"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("strong", null, "QA Workbench"), /* @__PURE__ */ React.createElement("span", null, "V2.4.0"))), /* @__PURE__ */ React.createElement("button", { className: "primarySideButton", type: "button", onClick: props.createProject }, /* @__PURE__ */ React.createElement(Icon, { name: "add" }), " New project"), /* @__PURE__ */ React.createElement("button", { className: "sideAction", type: "button", onClick: props.createChat }, /* @__PURE__ */ React.createElement(Icon, { name: "chat" }), " New chat"), /* @__PURE__ */ React.createElement("label", { className: "sideSearch" }, "Search", /* @__PURE__ */ React.createElement("input", { value: props.search, onChange: (event) => props.setSearch(event.target.value), placeholder: "Search chats" })), /* @__PURE__ */ React.createElement("nav", { className: "sideNav" }, [
+    return /* @__PURE__ */ React.createElement("aside", { className: "sidebar" }, /* @__PURE__ */ React.createElement("div", { className: "sideBrand" }, /* @__PURE__ */ React.createElement("div", { className: "brandMark" }, "QA"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("strong", null, "QA Workbench"))), /* @__PURE__ */ React.createElement("button", { className: "primarySideButton", type: "button", onClick: props.createProject }, /* @__PURE__ */ React.createElement(Icon, { name: "add" }), " New project"), showChats && /* @__PURE__ */ React.createElement("button", { className: "sideAction", type: "button", onClick: props.createChat }, /* @__PURE__ */ React.createElement(Icon, { name: "chat" }), " New chat"), /* @__PURE__ */ React.createElement("nav", { className: "sideNav" }, [
       ["analyzer", "analytics", "Analyzer"],
       ["testing", "science", "Testing"],
       ["docs", "description", "Docs"]
-    ].map(([tab, icon, label]) => /* @__PURE__ */ React.createElement("button", { key: tab, className: cx("navButton", props.activeTab === tab && "active"), type: "button", onClick: () => props.setActiveTab(tab) }, /* @__PURE__ */ React.createElement(Icon, { name: icon, filled: props.activeTab === tab }), " ", label))), /* @__PURE__ */ React.createElement(SectionTitle, { label: "Projects" }), /* @__PURE__ */ React.createElement("div", { className: "sideList projectList" }, props.projects.map((project) => /* @__PURE__ */ React.createElement(
-      "button",
-      {
-        key: project.id,
-        className: cx("sideListItem", project.id === props.activeProjectId && "active"),
-        type: "button",
-        onClick: () => props.setProject(project.id)
-      },
-      /* @__PURE__ */ React.createElement("span", null, project.name),
-      /* @__PURE__ */ React.createElement("small", null, project.yellow_ai_target?.platform || "local")
-    ))), /* @__PURE__ */ React.createElement(SectionTitle, { label: "Chats" }), /* @__PURE__ */ React.createElement("div", { className: "sideList chatList" }, filteredChats.length ? filteredChats.map((chat) => /* @__PURE__ */ React.createElement("button", { key: chat.id, className: cx("sideListItem", chat.id === props.activeChatId && "active"), type: "button", onClick: () => props.setChat(chat) }, /* @__PURE__ */ React.createElement("span", null, chat.title), /* @__PURE__ */ React.createElement("small", null, chat.mode))) : /* @__PURE__ */ React.createElement("div", { className: "sideEmpty" }, "No ", mode, " chats yet")), /* @__PURE__ */ React.createElement("div", { className: "sidebarBottom" }, /* @__PURE__ */ React.createElement("div", { className: "userBadge" }, /* @__PURE__ */ React.createElement(Icon, { name: "account_circle" }), /* @__PURE__ */ React.createElement("span", null, props.user?.email || "Signed in")), /* @__PURE__ */ React.createElement("button", { className: "sideAction ghost", type: "button", onClick: props.openSettings }, /* @__PURE__ */ React.createElement(Icon, { name: "settings" }), " Settings"), /* @__PURE__ */ React.createElement("button", { className: "sideAction ghost", type: "button", onClick: props.refresh }, /* @__PURE__ */ React.createElement(Icon, { name: "refresh" }), " Refresh"), /* @__PURE__ */ React.createElement("button", { className: "sideAction ghost", type: "button", onClick: props.logout }, /* @__PURE__ */ React.createElement(Icon, { name: "logout" }), " Logout")));
+    ].map(([tab, icon, label]) => /* @__PURE__ */ React.createElement("button", { key: tab, className: cx("navButton", props.activeTab === tab && "active"), type: "button", onClick: () => props.setActiveTab(tab) }, /* @__PURE__ */ React.createElement(Icon, { name: icon, filled: props.activeTab === tab }), " ", label))), showChats && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("label", { className: "sideSearch" }, "Search", /* @__PURE__ */ React.createElement("input", { value: props.search, onChange: (event) => props.setSearch(event.target.value), placeholder: "Search chats" })), /* @__PURE__ */ React.createElement(SectionTitle, { label: "Chats" }), /* @__PURE__ */ React.createElement("div", { className: "sideList chatList" }, filteredChats.length ? filteredChats.map((chat) => /* @__PURE__ */ React.createElement("div", { key: chat.id, className: cx("chatListItem", chat.id === props.activeChatId && "active") }, /* @__PURE__ */ React.createElement("button", { className: "chatSelectButton", type: "button", onClick: () => props.setChat(chat) }, /* @__PURE__ */ React.createElement("span", null, chat.title), /* @__PURE__ */ React.createElement("small", null, chat.mode)), /* @__PURE__ */ React.createElement("button", { className: "chatDeleteButton", type: "button", "aria-label": `Delete ${chat.title}`, title: "Delete chat", onClick: () => props.deleteChat(chat) }, /* @__PURE__ */ React.createElement(Icon, { name: "delete" })))) : /* @__PURE__ */ React.createElement("div", { className: "sideEmpty" }, "No ", mode, " chats yet"))));
   }
   function SectionTitle({ label }) {
     return /* @__PURE__ */ React.createElement("div", { className: "sideSectionHeader" }, label);
   }
-  function TopBar({ activeTab, activeProject, loading, error }) {
-    return /* @__PURE__ */ React.createElement("header", { className: "topBar" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", null, activeTab === "analyzer" ? "QA Analyzer" : activeTab === "testing" ? "Test Execution Board" : "Documentation Hub"), /* @__PURE__ */ React.createElement("p", null, activeProject?.name || "Yellow.ai Chat QA Workbench")), /* @__PURE__ */ React.createElement("div", { className: "topBarMeta" }, error && /* @__PURE__ */ React.createElement("span", { className: "statusPill error" }, error), loading && /* @__PURE__ */ React.createElement("span", { className: "statusPill warn" }, "Working"), /* @__PURE__ */ React.createElement("span", { className: "statusPill" }, "Local MVP")));
+  function TopBar({ activeTab, activeProject, projects, onProjectChange, user, onOpenSettings, onRefresh, onLogout }) {
+    const titles = {
+      analyzer: "Analyzer",
+      testing: "Testing",
+      docs: "Docs"
+    };
+    return /* @__PURE__ */ React.createElement("header", { className: "topBar" }, /* @__PURE__ */ React.createElement("div", { className: "topBarLead" }, /* @__PURE__ */ React.createElement("h1", null, titles[activeTab] || "Workbench"), /* @__PURE__ */ React.createElement(ProjectSwitcher, { projects, activeProject, onChange: onProjectChange })), /* @__PURE__ */ React.createElement("div", { className: "topBarActions" }, /* @__PURE__ */ React.createElement(UserMenu, { user, onOpenSettings, onRefresh, onLogout })));
+  }
+  function ProjectSwitcher({ projects, activeProject, onChange }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+    useClickOutside(ref, () => setOpen(false));
+    return /* @__PURE__ */ React.createElement("div", { className: "dropdownAnchor projectSwitcher", ref }, /* @__PURE__ */ React.createElement("button", { className: "projectSwitcherButton", type: "button", onClick: () => setOpen((current) => !current), "aria-expanded": open }, /* @__PURE__ */ React.createElement("span", { className: "projectSwitcherName" }, activeProject?.name || "Select project"), /* @__PURE__ */ React.createElement(Icon, { name: "expand_more" })), open && /* @__PURE__ */ React.createElement("div", { className: "dropdownMenu projectSwitcherMenu", role: "menu" }, projects.map((project) => /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        key: project.id,
+        className: cx("dropdownItem", project.id === activeProject?.id && "active"),
+        type: "button",
+        role: "menuitem",
+        onClick: () => {
+          onChange(project.id);
+          setOpen(false);
+        }
+      },
+      /* @__PURE__ */ React.createElement("span", null, project.name),
+      /* @__PURE__ */ React.createElement("small", null, project.yellow_ai_target?.platform || "local")
+    )), !projects.length && /* @__PURE__ */ React.createElement("div", { className: "dropdownEmpty" }, "No projects yet")));
+  }
+  function UserMenu({ user, onOpenSettings, onRefresh, onLogout }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+    useClickOutside(ref, () => setOpen(false));
+    const initials = (user?.email || "U").slice(0, 1).toUpperCase();
+    return /* @__PURE__ */ React.createElement("div", { className: "dropdownAnchor userMenu", ref }, /* @__PURE__ */ React.createElement("button", { className: "userMenuButton", type: "button", onClick: () => setOpen((current) => !current), "aria-expanded": open, "aria-label": "Account menu" }, /* @__PURE__ */ React.createElement("span", { className: "userAvatar" }, initials)), open && /* @__PURE__ */ React.createElement("div", { className: "dropdownMenu userMenuPanel", role: "menu" }, /* @__PURE__ */ React.createElement("div", { className: "userMenuHeader" }, /* @__PURE__ */ React.createElement("strong", null, user?.email || "Signed in")), /* @__PURE__ */ React.createElement("button", { className: "dropdownItem", type: "button", role: "menuitem", onClick: () => {
+      onOpenSettings();
+      setOpen(false);
+    } }, /* @__PURE__ */ React.createElement(Icon, { name: "settings" }), " Settings"), /* @__PURE__ */ React.createElement("button", { className: "dropdownItem", type: "button", role: "menuitem", onClick: () => {
+      onRefresh();
+      setOpen(false);
+    } }, /* @__PURE__ */ React.createElement(Icon, { name: "refresh" }), " Refresh"), /* @__PURE__ */ React.createElement("button", { className: "dropdownItem danger", type: "button", role: "menuitem", onClick: () => {
+      onLogout();
+      setOpen(false);
+    } }, /* @__PURE__ */ React.createElement(Icon, { name: "logout" }), " Logout")));
+  }
+  function ActionsMenu({ items, loading }) {
+    const [open, setOpen] = useState(false);
+    const ref = useRef(null);
+    useClickOutside(ref, () => setOpen(false));
+    return /* @__PURE__ */ React.createElement("div", { className: "dropdownAnchor actionsMenu", ref }, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => setOpen((current) => !current), "aria-expanded": open }, /* @__PURE__ */ React.createElement(Icon, { name: "bolt" }), " Actions"), open && /* @__PURE__ */ React.createElement("div", { className: "dropdownMenu actionsMenuPanel", role: "menu" }, items.map((item) => /* @__PURE__ */ React.createElement(
+      "button",
+      {
+        key: item.id,
+        className: "dropdownItem",
+        type: "button",
+        role: "menuitem",
+        disabled: item.disabled,
+        onClick: () => {
+          item.onClick();
+          setOpen(false);
+        }
+      },
+      /* @__PURE__ */ React.createElement(Icon, { name: item.icon }),
+      /* @__PURE__ */ React.createElement("span", null, item.label)
+    )), loading && /* @__PURE__ */ React.createElement("div", { className: "dropdownHint" }, "Working on ", formatLoadingMessage(loading), "...")));
   }
   function AnalyzerTab({ chat, sendMessage, createSuite, attachReport, prepareGoalBrief, activeProject, documents, changePlans, suites, runs, platformSnapshots, yellowAccess, saveYellowAccess, runBotDiscovery, runPlatformSnapshot, config, loading }) {
     const [message, setMessage] = useState("");
     const [showReportPicker, setShowReportPicker] = useState(false);
+    const [contextOpen, setContextOpen] = useState(false);
     function chooseReport(reportId) {
       setShowReportPicker(false);
       attachReport(reportId);
     }
+    const actionItems = [
+      {
+        id: "pinpoint",
+        icon: "troubleshoot",
+        label: "Pinpoint report",
+        onClick: () => setShowReportPicker(true)
+      },
+      {
+        id: "brief",
+        icon: "assignment",
+        label: "Prepare test brief",
+        disabled: loading === "goal-brief",
+        onClick: prepareGoalBrief
+      },
+      {
+        id: "suite",
+        icon: "science",
+        label: "Create suite",
+        onClick: createSuite
+      },
+      {
+        id: "connect",
+        icon: "login",
+        label: "Connect session",
+        disabled: loading === "platform-snapshot",
+        onClick: () => runPlatformSnapshot({ headless: false, wait_for_login: true })
+      },
+      {
+        id: "snapshot",
+        icon: "travel_explore",
+        label: "Run snapshot",
+        disabled: loading === "platform-snapshot",
+        onClick: () => runPlatformSnapshot()
+      }
+    ];
     return /* @__PURE__ */ React.createElement("div", { className: "mainGrid analyzerGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel chatPanel" }, /* @__PURE__ */ React.createElement(
       PanelHeader,
       {
-        title: "Analyzer Session",
-        meta: "SESSION ID: PROJECT-CONTEXT",
-        actions: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => setShowReportPicker(true) }, /* @__PURE__ */ React.createElement(Icon, { name: "troubleshoot" }), " Pinpoint report"), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", disabled: loading === "goal-brief", onClick: prepareGoalBrief }, /* @__PURE__ */ React.createElement(Icon, { name: "assignment" }), " Prepare test brief"), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: createSuite }, /* @__PURE__ */ React.createElement(Icon, { name: "science" }), " Create suite"), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", disabled: loading === "platform-snapshot", onClick: () => runPlatformSnapshot({ headless: false, wait_for_login: true }) }, /* @__PURE__ */ React.createElement(Icon, { name: "login" }), " Connect session"), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", disabled: loading === "platform-snapshot", onClick: () => runPlatformSnapshot() }, /* @__PURE__ */ React.createElement(Icon, { name: "travel_explore" }), " Run snapshot"))
+        title: "Analyzer",
+        actions: /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement(ActionsMenu, { items: actionItems, loading }), /* @__PURE__ */ React.createElement("button", { className: "iconButton contextToggle", type: "button", "aria-label": "Open project context", onClick: () => setContextOpen(true) }, /* @__PURE__ */ React.createElement(Icon, { name: "info" })))
       }
     ), /* @__PURE__ */ React.createElement(YellowAccessPrompt, { access: yellowAccess, saveYellowAccess, runBotDiscovery, loading }), /* @__PURE__ */ React.createElement(ChatMessages, { chat, empty: "Start an analyzer chat for Yellow.ai docs, reports, RAG checks, or test planning." }), /* @__PURE__ */ React.createElement(
       "form",
@@ -716,7 +909,23 @@ var BotQAApp = (() => {
         onChoose: chooseReport,
         onClose: () => setShowReportPicker(false)
       }
-    )), /* @__PURE__ */ React.createElement("aside", { className: "workPanel contextPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Project Context", meta: "ATTACHED KNOWLEDGE" }), /* @__PURE__ */ React.createElement(ContextPanel, { activeProject, documents, changePlans, suites, runs, platformSnapshots, yellowAccess, config })));
+    )), contextOpen && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "drawerBackdrop", role: "presentation", onMouseDown: () => setContextOpen(false) }), /* @__PURE__ */ React.createElement("aside", { className: "contextDrawer", role: "dialog", "aria-modal": "true", "aria-labelledby": "context-drawer-title" }, /* @__PURE__ */ React.createElement("div", { className: "drawerHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", { id: "context-drawer-title" }, "Project Context"), /* @__PURE__ */ React.createElement("p", null, "Attached knowledge and integration health")), /* @__PURE__ */ React.createElement("button", { className: "iconButton", type: "button", "aria-label": "Close project context", onClick: () => setContextOpen(false) }, /* @__PURE__ */ React.createElement(Icon, { name: "close" }))), /* @__PURE__ */ React.createElement("div", { className: "drawerBody" }, /* @__PURE__ */ React.createElement(ContextPanel, { activeProject, documents, changePlans, suites, runs, platformSnapshots, yellowAccess, config })))));
+  }
+  function NewProjectDialog({ loading, onCreate, onClose }) {
+    const [name, setName] = useState("New bot project");
+    const [description, setDescription] = useState("");
+    const busy = loading === "project";
+    function submit(event) {
+      event.preventDefault();
+      const cleanName = name.trim();
+      if (!cleanName || busy) return;
+      onCreate({ name: cleanName, description: description.trim() });
+    }
+    return /* @__PURE__ */ React.createElement("div", { className: "modalOverlay", role: "presentation", onMouseDown: busy ? void 0 : onClose }, /* @__PURE__ */ React.createElement("section", { className: "projectDialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "new-project-title", onMouseDown: (event) => event.stopPropagation() }, /* @__PURE__ */ React.createElement("form", { onSubmit: submit }, /* @__PURE__ */ React.createElement("div", { className: "dialogHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", { id: "new-project-title" }, "New Project"), /* @__PURE__ */ React.createElement("p", null, "Create a clean workspace for one Yellow.ai bot, its chats, tests, reports, and docs.")), /* @__PURE__ */ React.createElement("button", { className: "iconButton", type: "button", "aria-label": "Close new project dialog", disabled: busy, onClick: onClose }, /* @__PURE__ */ React.createElement(Icon, { name: "close" }))), /* @__PURE__ */ React.createElement("div", { className: "projectDialogBody" }, /* @__PURE__ */ React.createElement(Field, { label: "Project name" }, /* @__PURE__ */ React.createElement("input", { value: name, onChange: (event) => setName(event.target.value), autoFocus: true })), /* @__PURE__ */ React.createElement(Field, { label: "Description" }, /* @__PURE__ */ React.createElement("textarea", { value: description, onChange: (event) => setDescription(event.target.value), placeholder: "Optional note about this bot or testing scope" })), busy && /* @__PURE__ */ React.createElement("div", { className: "dialogLoading", role: "status" }, /* @__PURE__ */ React.createElement("span", { className: "toastSpinner", "aria-hidden": "true" }), "Loading... Creating project")), /* @__PURE__ */ React.createElement("div", { className: "dialogActions" }, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", disabled: busy, onClick: onClose }, "Cancel"), /* @__PURE__ */ React.createElement("button", { type: "submit", disabled: busy || !name.trim() }, /* @__PURE__ */ React.createElement(Icon, { name: "add" }), " ", busy ? "Creating..." : "Create project")))));
+  }
+  function DeleteChatDialog({ chat, loading, onDelete, onClose }) {
+    const busy = loading === "delete-chat";
+    return /* @__PURE__ */ React.createElement("div", { className: "modalOverlay", role: "presentation", onMouseDown: busy ? void 0 : onClose }, /* @__PURE__ */ React.createElement("section", { className: "confirmDialog", role: "dialog", "aria-modal": "true", "aria-labelledby": "delete-chat-title", onMouseDown: (event) => event.stopPropagation() }, /* @__PURE__ */ React.createElement("div", { className: "dialogHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", { id: "delete-chat-title" }, "Delete Chat"), /* @__PURE__ */ React.createElement("p", null, "This removes the chat from the current project. Test runs and reports stay untouched.")), /* @__PURE__ */ React.createElement("button", { className: "iconButton", type: "button", "aria-label": "Close delete chat dialog", disabled: busy, onClick: onClose }, /* @__PURE__ */ React.createElement(Icon, { name: "close" }))), /* @__PURE__ */ React.createElement("div", { className: "projectDialogBody" }, /* @__PURE__ */ React.createElement("div", { className: "deletePreview" }, /* @__PURE__ */ React.createElement(Icon, { name: "chat" }), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("strong", null, chat.title || "Untitled chat"), /* @__PURE__ */ React.createElement("span", null, chat.mode || "analyzer", " chat"))), busy && /* @__PURE__ */ React.createElement("div", { className: "dialogLoading", role: "status" }, /* @__PURE__ */ React.createElement("span", { className: "toastSpinner", "aria-hidden": "true" }), "Loading... Deleting chat")), /* @__PURE__ */ React.createElement("div", { className: "dialogActions" }, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", disabled: busy, onClick: onClose }, "Cancel"), /* @__PURE__ */ React.createElement("button", { className: "dangerButton", type: "button", disabled: busy, onClick: onDelete }, /* @__PURE__ */ React.createElement(Icon, { name: "delete" }), " ", busy ? "Deleting..." : "Delete chat"))));
   }
   function ReportPickerDialog({ runs, suites, loading, onChoose, onClose }) {
     const [query, setQuery] = useState("");
@@ -782,7 +991,7 @@ var BotQAApp = (() => {
     const latestSnapshot = platformSnapshots[0];
     const goalBrief = activeProject?.goal_test_brief;
     const botDiscovery = activeProject?.bot_discovery;
-    return /* @__PURE__ */ React.createElement("div", { className: "contextStack" }, /* @__PURE__ */ React.createElement("div", { className: "metricGrid" }, /* @__PURE__ */ React.createElement(Metric, { label: "Docs", value: documents.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Plans", value: changePlans.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Suites", value: suites.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Snapshots", value: platformSnapshots.length })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock specialistModeBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Analyzer Mode"), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "Read-only"), /* @__PURE__ */ React.createElement(Pill, null, "Diagnose"), /* @__PURE__ */ React.createElement(Pill, null, "Recommend"), /* @__PURE__ */ React.createElement(Pill, null, "Test")), /* @__PURE__ */ React.createElement("p", null, "Analyzer can pinpoint Yellow.ai issues and suggest exact fixes, but it will not edit Studio, publish, or mutate production.")), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Yellow.ai Target"), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, Object.keys(target).length ? Object.entries(target).map(([key, value]) => /* @__PURE__ */ React.createElement(Pill, { key }, key.replaceAll("_", " "), ": ", value)) : /* @__PURE__ */ React.createElement(Pill, null, "No target saved"))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Bot Discovery"), botDiscovery?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "discovered"), /* @__PURE__ */ React.createElement(Pill, null, botDiscovery.id)), /* @__PURE__ */ React.createElement("p", null, botDiscovery.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No bot discovery", text: "Save bot access, then run Discover bot to build project context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Provider Status"), /* @__PURE__ */ React.createElement("div", { className: "statusRows" }, /* @__PURE__ */ React.createElement(StatusRow, { label: "OpenAI", ready: config?.openai?.configured, value: config?.openai?.provider || "openai" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Playwright", ready: config?.playwright?.available, value: config?.playwright?.package || "browser runner" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Yellow.ai Access", ready: Boolean(yellowAccess?.bot_id && yellowAccess?.api_key_configured), value: yellowAccess?.bot_id || "ask in chat" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Platform Snapshot", ready: config?.platform_snapshot?.available, value: config?.platform_snapshot?.package || "crawler" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Storage", ready: config?.storage?.configured, value: config?.storage?.provider || "local_json" }))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Latest Platform Snapshot"), latestSnapshot ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: latestSnapshot.status === "ok" ? "ok" : "warn" }, latestSnapshot.status), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.page_count || 0, " pages"), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.network_event_count || 0, " network signals")), /* @__PURE__ */ React.createElement("p", null, latestSnapshot.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No platform snapshot", text: "Run a read-only Yellow.ai snapshot to attach agents, workflows, tools, and KB context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Goal Test Brief"), goalBrief?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "ready"), /* @__PURE__ */ React.createElement(Pill, null, goalBrief.max_turns || 10, " turns")), /* @__PURE__ */ React.createElement("p", null, goalBrief.title || goalBrief.goal)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No goal brief", text: "Use Analyzer to prepare an adaptive test brief for the Testing tab." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Suggested Next Actions"), /* @__PURE__ */ React.createElement("ul", { className: "compactList" }, /* @__PURE__ */ React.createElement("li", null, latestSnapshot ? `Use ${latestSnapshot.id} for failure root-cause analysis.` : "Run a platform snapshot to attach Studio context automatically."), /* @__PURE__ */ React.createElement("li", null, botDiscovery?.id ? `Use discovered bot profile ${botDiscovery.id} for suite generation.` : "Run bot discovery after attaching Yellow.ai access."), /* @__PURE__ */ React.createElement("li", null, goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare a goal-driven test brief from Analyzer."), /* @__PURE__ */ React.createElement("li", null, changePlans[0] ? `Review ${changePlans[0].id} from ${changePlans[0].document_name}` : "Upload a Yellow.ai guide, flow spec, or transcript if API access is incomplete."), /* @__PURE__ */ React.createElement("li", null, suites[0] ? `Run or inspect ${suites[0].name}` : "Generate a first regression suite."), /* @__PURE__ */ React.createElement("li", null, runs[0] ? `Open latest report ${runs[0].report_id}` : "Run a real web-widget chat automation script."))));
+    return /* @__PURE__ */ React.createElement("div", { className: "contextStack" }, /* @__PURE__ */ React.createElement("div", { className: "metricGrid" }, /* @__PURE__ */ React.createElement(Metric, { label: "Docs", value: documents.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Plans", value: changePlans.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Suites", value: suites.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Snapshots", value: platformSnapshots.length })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Yellow.ai Target"), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, Object.keys(target).length ? Object.entries(target).map(([key, value]) => /* @__PURE__ */ React.createElement(Pill, { key }, key.replaceAll("_", " "), ": ", value)) : /* @__PURE__ */ React.createElement(Pill, null, "No target saved"))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Bot Discovery"), botDiscovery?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "discovered"), /* @__PURE__ */ React.createElement(Pill, null, botDiscovery.id)), /* @__PURE__ */ React.createElement("p", null, botDiscovery.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No bot discovery", text: "Save bot access, then run Discover bot to build project context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Provider Status"), /* @__PURE__ */ React.createElement("div", { className: "statusRows" }, /* @__PURE__ */ React.createElement(StatusRow, { label: "OpenAI", ready: config?.openai?.configured, value: config?.openai?.provider || "openai" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Playwright", ready: config?.playwright?.available, value: config?.playwright?.package || "browser runner" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Yellow.ai Access", ready: Boolean(yellowAccess?.bot_id && yellowAccess?.api_key_configured), value: yellowAccess?.bot_id || "ask in chat" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Platform Snapshot", ready: config?.platform_snapshot?.available, value: config?.platform_snapshot?.package || "crawler" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Storage", ready: config?.storage?.configured, value: config?.storage?.provider || "local_json" }))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Latest Platform Snapshot"), latestSnapshot ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: latestSnapshot.status === "ok" ? "ok" : "warn" }, latestSnapshot.status), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.page_count || 0, " pages"), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.network_event_count || 0, " network signals")), /* @__PURE__ */ React.createElement("p", null, latestSnapshot.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No platform snapshot", text: "Run a read-only Yellow.ai snapshot to attach agents, workflows, tools, and KB context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Goal Test Brief"), goalBrief?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "ready"), /* @__PURE__ */ React.createElement(Pill, null, goalBrief.max_turns || 10, " turns")), /* @__PURE__ */ React.createElement("p", null, goalBrief.title || goalBrief.goal)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No goal brief", text: "Use Analyzer to prepare an adaptive test brief for the Testing tab." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Next steps"), /* @__PURE__ */ React.createElement("ul", { className: "compactList" }, /* @__PURE__ */ React.createElement("li", null, latestSnapshot ? `Use ${latestSnapshot.id} for failure root-cause analysis.` : "Run a platform snapshot to attach Studio context automatically."), /* @__PURE__ */ React.createElement("li", null, goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare a goal-driven test brief from Analyzer."), /* @__PURE__ */ React.createElement("li", null, runs[0] ? `Open latest report ${runs[0].report_id}` : "Run a real web-widget chat automation script."))));
   }
   function suiteChannelCount(suite, channel) {
     return (suite.test_cases || []).filter((item) => item.channel === channel).length;
@@ -841,17 +1050,17 @@ var BotQAApp = (() => {
     useEffect(() => {
       runsScrollRef.current?.scrollTo({ top: 0 });
     }, [activeRuns[0]?.id]);
-    return /* @__PURE__ */ React.createElement("div", { className: "testingStack" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel testingModePanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Testing Workspace", meta: testMode === "chat" ? "YELLOW.AI CHAT TESTING" : "YELLOW.AI VOICE ANALYSIS" }), /* @__PURE__ */ React.createElement("div", { className: "testingChannelTabs" }, /* @__PURE__ */ React.createElement("button", { className: testMode === "chat" ? "active" : "", type: "button", onClick: () => setTestMode("chat") }, /* @__PURE__ */ React.createElement(Icon, { name: "chat", filled: true }), " Chat Testing"), /* @__PURE__ */ React.createElement("button", { className: testMode === "voice" ? "active" : "", type: "button", onClick: () => setTestMode("voice") }, /* @__PURE__ */ React.createElement(Icon, { name: "call", filled: true }), " Voice Call Analysis")), /* @__PURE__ */ React.createElement("div", { className: "testingModeSummary" }, modeSummary.map(([label, value]) => /* @__PURE__ */ React.createElement(Metric, { key: label, label, value })))), testMode === "chat" ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "mainGrid testingGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Bot Core Config", meta: "CHAT SUITE INPUTS" }), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "testingStack" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel testingModePanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Testing Workspace" }), /* @__PURE__ */ React.createElement("div", { className: "testingChannelTabs" }, /* @__PURE__ */ React.createElement("button", { className: testMode === "chat" ? "active" : "", type: "button", onClick: () => setTestMode("chat") }, /* @__PURE__ */ React.createElement(Icon, { name: "chat", filled: true }), " Chat Testing"), /* @__PURE__ */ React.createElement("button", { className: testMode === "voice" ? "active" : "", type: "button", onClick: () => setTestMode("voice") }, /* @__PURE__ */ React.createElement(Icon, { name: "call", filled: true }), " Voice Call Analysis")), /* @__PURE__ */ React.createElement("div", { className: "testingModeSummary" }, modeSummary.map(([label, value]) => /* @__PURE__ */ React.createElement(Metric, { key: label, label, value })))), testMode === "chat" ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "mainGrid testingGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Bot Core Config" }), /* @__PURE__ */ React.createElement(
       BotCoreConfig,
       {
         profile,
         setProfile,
         saveProfile,
-        generateSuite: () => generateSuite("chat"),
+        generateSuite: () => generateSuite(false),
         generateSuiteLabel: "Generate Chat Suite",
         loading
       }
-    )), /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Run Chat Tests", meta: "REAL WEB-WIDGET AUTOMATION" }), /* @__PURE__ */ React.createElement(
+    )), /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Run Chat Tests" }), /* @__PURE__ */ React.createElement(
       ChatAutomationPanel,
       {
         profile,
@@ -984,6 +1193,7 @@ var BotQAApp = (() => {
     ), /* @__PURE__ */ React.createElement("span", null, "Headless browser"))), /* @__PURE__ */ React.createElement("details", { className: "testAdvancedDetails" }, /* @__PURE__ */ React.createElement("summary", null, "Scripted regression runner"), /* @__PURE__ */ React.createElement(Field, { label: "Markdown script" }, /* @__PURE__ */ React.createElement("textarea", { className: "automationScript", value: script, onChange: (event) => setScript(event.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "scriptMetaRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: turnsInScript >= 6 ? "ok" : "warn" }, turnsInScript || 0, " turns"), /* @__PURE__ */ React.createElement("span", null, scriptTitle(script))), scriptIsShort && /* @__PURE__ */ React.createElement("p", { className: "fieldHint warnText" }, "This script is short. It will stop after ", turnsInScript, " user turns. Add more User/Bot turns for deeper regression coverage."), /* @__PURE__ */ React.createElement("p", { className: "fieldHint" }, "Use exact ", /* @__PURE__ */ React.createElement("code", null, "User:"), " / ", /* @__PURE__ */ React.createElement("code", null, "Bot:"), " turn blocks. For quick replies, make the User value exactly match the visible option."), /* @__PURE__ */ React.createElement("div", { className: "automationActions" }, /* @__PURE__ */ React.createElement("input", { className: "scriptFileInput", type: "file", accept: ".md,.txt", onChange: (event) => loadScriptFile(event.target.files[0]) }), /* @__PURE__ */ React.createElement("button", { type: "button", disabled: loading === "chat-automation" || !endpointReady, onClick: () => runChatAutomation(script) }, /* @__PURE__ */ React.createElement(Icon, { name: "play_arrow" }), " Run Scripted Test"))));
   }
   function BotCoreConfig({ profile, setProfile, saveProfile, generateSuite, generateSuiteLabel = "Generate Test Suite", loading }) {
+    const [showSuiteRequest, setShowSuiteRequest] = useState(Boolean(profile.suite_request));
     const update = (key, value) => setProfile((current) => ({ ...current, [key]: value }));
     return /* @__PURE__ */ React.createElement("div", { className: "configForm" }, /* @__PURE__ */ React.createElement("div", { className: "twoCol" }, /* @__PURE__ */ React.createElement(Field, { label: "Bot name" }, /* @__PURE__ */ React.createElement("input", { value: profile.bot_name || "", onChange: (event) => update("bot_name", event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Chat cases to generate" }, /* @__PURE__ */ React.createElement(
       "input",
@@ -995,7 +1205,15 @@ var BotQAApp = (() => {
         value: profile.chat_case_count || "12",
         onChange: (event) => update("chat_case_count", event.target.value)
       }
-    ))), /* @__PURE__ */ React.createElement(Field, { label: "Chat endpoint / widget URL" }, /* @__PURE__ */ React.createElement("input", { value: profile.chat_endpoint || "", onChange: (event) => update("chat_endpoint", event.target.value), placeholder: "https://..." })), /* @__PURE__ */ React.createElement(Field, { label: "Business goal" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.business_goal || "", onChange: (event) => update("business_goal", event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Journeys / risks to cover" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.flow_docs || "", onChange: (event) => update("flow_docs", event.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "buttonRow" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: generateSuite, disabled: loading === "generate-suite" }, /* @__PURE__ */ React.createElement(Icon, { name: "play_arrow" }), " ", generateSuiteLabel), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: saveProfile, disabled: loading === "save-profile" }, "Save Project Profile")));
+    ))), /* @__PURE__ */ React.createElement(Field, { label: "Chat endpoint / widget URL" }, /* @__PURE__ */ React.createElement("input", { value: profile.chat_endpoint || "", onChange: (event) => update("chat_endpoint", event.target.value), placeholder: "https://..." })), /* @__PURE__ */ React.createElement(Field, { label: "Business goal" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.business_goal || "", onChange: (event) => update("business_goal", event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Journeys / risks to cover" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.flow_docs || "", onChange: (event) => update("flow_docs", event.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "suiteRequestToggleRow" }, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => setShowSuiteRequest((current) => !current) }, /* @__PURE__ */ React.createElement(Icon, { name: showSuiteRequest ? "expand_less" : "tune" }), " ", showSuiteRequest ? "Hide specific request" : "Specific suite request"), profile.suite_request && /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "custom request active")), showSuiteRequest && /* @__PURE__ */ React.createElement("div", { className: "suiteRequestPanel" }, /* @__PURE__ */ React.createElement(Field, { label: "What specific tests or suite do you need?" }, /* @__PURE__ */ React.createElement(
+      "textarea",
+      {
+        className: "compactTextarea",
+        value: profile.suite_request || "",
+        onChange: (event) => update("suite_request", event.target.value),
+        placeholder: "Example: Create 8 installation booking cases focused on language persistence, pincode validation, confirmation after address capture, fallback recovery, and positive closure."
+      }
+    )), /* @__PURE__ */ React.createElement("p", { className: "fieldHint" }, "This request is used only for suite generation. The bot profile and discovered Yellow.ai context still stay as the source of truth.")), /* @__PURE__ */ React.createElement("div", { className: "buttonRow" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: generateSuite, disabled: loading === "generate-suite" }, /* @__PURE__ */ React.createElement(Icon, { name: "play_arrow" }), " ", generateSuiteLabel), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: saveProfile, disabled: loading === "save-profile" }, "Save Project Profile")));
   }
   function DocsTab({ docsPages, documents, changePlans, uploadDocument, analyzeDocument, approvePlan, activeProjectId, chat, sendMessage, createDocsChat, loading }) {
     const [query, setQuery] = useState("");
@@ -1009,7 +1227,7 @@ var BotQAApp = (() => {
       });
       setResults(payload.results || []);
     }
-    return /* @__PURE__ */ React.createElement("div", { className: "docsStack" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Knowledge Base", meta: "HANDBOOK + PROJECT DOCS" }), /* @__PURE__ */ React.createElement("form", { className: "searchHero", onSubmit: searchDocs }, /* @__PURE__ */ React.createElement(Icon, { name: "search" }), /* @__PURE__ */ React.createElement("input", { value: query, onChange: (event) => setQuery(event.target.value), placeholder: "Search V3 routing, RAG testing, provider setup..." }), /* @__PURE__ */ React.createElement("button", { type: "submit" }, "Search")), /* @__PURE__ */ React.createElement("div", { className: "docGrid" }, (results.length ? results : docsPages.slice(0, 8)).map((page) => /* @__PURE__ */ React.createElement("article", { className: "docCard", key: `${page.type || "page"}-${page.id}` }, /* @__PURE__ */ React.createElement("div", { className: "docIcon" }, /* @__PURE__ */ React.createElement(Icon, { name: page.type === "document" ? "article" : "description" })), /* @__PURE__ */ React.createElement("h3", null, page.title), /* @__PURE__ */ React.createElement(Pill, null, page.category), /* @__PURE__ */ React.createElement("p", null, (page.excerpt || page.body || "").slice(0, 260)))))), /* @__PURE__ */ React.createElement("div", { className: "mainGrid docsGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Project Knowledge", meta: `${documents.length} DOCS` }), /* @__PURE__ */ React.createElement("input", { className: "fileInput", type: "file", accept: ".pdf,.docx,.md,.txt,.json,.csv", onChange: (event) => uploadDocument(event.target.files[0]) }), /* @__PURE__ */ React.createElement(DocumentList, { documents, analyzeDocument, loading })), /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Change Plans", meta: `${changePlans.length} PLANS` }), /* @__PURE__ */ React.createElement(ChangePlans, { plans: changePlans, approvePlan, loading }))), /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Docs Assistant", meta: "SOURCE-GROUNDED HELP", actions: /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: createDocsChat }, "New docs chat") }), /* @__PURE__ */ React.createElement(ChatMessages, { chat, empty: "Ask about this tool, Yellow.ai V2/V3, RAG, chat testing, or setup.", compact: true }), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "docsStack" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Knowledge Base" }), /* @__PURE__ */ React.createElement("form", { className: "searchHero", onSubmit: searchDocs }, /* @__PURE__ */ React.createElement(Icon, { name: "search" }), /* @__PURE__ */ React.createElement("input", { value: query, onChange: (event) => setQuery(event.target.value), placeholder: "Search V3 routing, RAG testing, provider setup..." }), /* @__PURE__ */ React.createElement("button", { type: "submit" }, "Search")), /* @__PURE__ */ React.createElement("div", { className: "docGrid" }, (results.length ? results : docsPages.slice(0, 8)).map((page) => /* @__PURE__ */ React.createElement("article", { className: "docCard", key: `${page.type || "page"}-${page.id}` }, /* @__PURE__ */ React.createElement("div", { className: "docIcon" }, /* @__PURE__ */ React.createElement(Icon, { name: page.type === "document" ? "article" : "description" })), /* @__PURE__ */ React.createElement("h3", null, page.title), /* @__PURE__ */ React.createElement(Pill, null, page.category), /* @__PURE__ */ React.createElement("p", null, (page.excerpt || page.body || "").slice(0, 260)))))), /* @__PURE__ */ React.createElement("div", { className: "mainGrid docsGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Project Knowledge", meta: `${documents.length} DOCS` }), /* @__PURE__ */ React.createElement("input", { className: "fileInput", type: "file", accept: ".pdf,.docx,.md,.txt,.json,.csv", onChange: (event) => uploadDocument(event.target.files[0]) }), /* @__PURE__ */ React.createElement(DocumentList, { documents, analyzeDocument, loading })), /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Change Plans", meta: `${changePlans.length} PLANS` }), /* @__PURE__ */ React.createElement(ChangePlans, { plans: changePlans, approvePlan, loading }))), /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Docs Assistant", actions: /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: createDocsChat }, "New docs chat") }), /* @__PURE__ */ React.createElement(ChatMessages, { chat, empty: "Ask about this tool, Yellow.ai V2/V3, RAG, chat testing, or setup.", compact: true }), /* @__PURE__ */ React.createElement(
       "form",
       {
         className: "chatComposer",
@@ -1024,7 +1242,7 @@ var BotQAApp = (() => {
     )));
   }
   function PanelHeader({ title, meta, actions }) {
-    return /* @__PURE__ */ React.createElement("div", { className: "panelHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", null, title), meta && /* @__PURE__ */ React.createElement("span", null, meta)), actions && /* @__PURE__ */ React.createElement("div", { className: "buttonRow" }, actions));
+    return /* @__PURE__ */ React.createElement("div", { className: "panelHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", null, title), meta && /* @__PURE__ */ React.createElement("span", { className: "panelMeta" }, meta)), actions && /* @__PURE__ */ React.createElement("div", { className: "buttonRow" }, actions));
   }
   function Field({ label, children }) {
     return /* @__PURE__ */ React.createElement("label", { className: "field" }, /* @__PURE__ */ React.createElement("span", null, label), children);
@@ -1231,7 +1449,7 @@ var BotQAApp = (() => {
   function EmptyState({ title, text }) {
     return /* @__PURE__ */ React.createElement("div", { className: "emptyState" }, /* @__PURE__ */ React.createElement("h3", null, title), /* @__PURE__ */ React.createElement("p", null, text));
   }
-  function SettingsDialog({ config, setConfig, setError }) {
+  function SettingsDialog({ config, setConfig, onError }) {
     const [values, setValues] = useState({});
     const visibleKeys = ["DEFAULT_BOT_NAME", "DEFAULT_CHAT_ENDPOINT", "OPENAI_API_KEY", "OPENAI_MODEL"];
     useEffect(() => {
@@ -1254,7 +1472,7 @@ var BotQAApp = (() => {
         setConfig(await api("/api/config", { method: "POST", body: JSON.stringify({ settings: payload }) }));
         document.querySelector("#settingsDialog")?.close();
       } catch (err) {
-        setError(err.message);
+        onError(err.message);
       }
     }
     return /* @__PURE__ */ React.createElement("dialog", { id: "settingsDialog", className: "settingsDialog" }, /* @__PURE__ */ React.createElement("form", { onSubmit: save, className: "settingsForm" }, /* @__PURE__ */ React.createElement("div", { className: "dialogHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h2", null, "Runtime Settings"), /* @__PURE__ */ React.createElement("p", null, "Saved locally so each bot can be tested without editing environment files.")), /* @__PURE__ */ React.createElement("button", { className: "iconButton", type: "button", onClick: () => document.querySelector("#settingsDialog")?.close() }, "x")), /* @__PURE__ */ React.createElement(SettingsSection, { title: "Defaults", keys: ["DEFAULT_BOT_NAME", "DEFAULT_CHAT_ENDPOINT"], values, update, config }), /* @__PURE__ */ React.createElement(SettingsSection, { title: "AI Generation", keys: ["OPENAI_API_KEY", "OPENAI_MODEL"], values, update, config }), /* @__PURE__ */ React.createElement("div", { className: "dialogActions" }, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => document.querySelector("#settingsDialog")?.close() }, "Cancel"), /* @__PURE__ */ React.createElement("button", { type: "submit" }, "Save Settings"))));

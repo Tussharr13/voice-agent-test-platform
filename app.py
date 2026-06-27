@@ -882,11 +882,32 @@ def desired_chat_case_count(profile: Dict[str, Any]) -> int:
     return max(1, min(MAX_CHAT_CASE_COUNT, count))
 
 
+def suite_request_text(profile: Dict[str, Any]) -> str:
+    for key in ["suite_request", "custom_suite_request", "test_suite_request"]:
+        value = re.sub(r"\s+", " ", str(profile.get(key) or "")).strip()
+        if value:
+            return value[:2000]
+    return ""
+
+
+def requested_flow(profile: Dict[str, Any]) -> Dict[str, str]:
+    request = suite_request_text(profile)
+    if not request:
+        return {}
+    first_sentence = re.split(r"[.\n]", request, maxsplit=1)[0].strip()
+    label = first_sentence[:72].strip(" -,:;") or "Custom requested coverage"
+    return {"name": f"Requested: {label}", "description": request}
+
+
 def build_fallback_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
     channels = ["chat"]
 
     flows = extract_flows(profile)
+    custom_flow = requested_flow(profile)
+    if custom_flow:
+        flows = [custom_flow] + [flow for flow in flows if slugify(flow.get("name", "")) != slugify(custom_flow["name"])]
     desired_count = desired_chat_case_count(profile)
+    request = suite_request_text(profile)
     cases = []
     case_index = 0
     while len(cases) < desired_count:
@@ -909,7 +930,7 @@ def build_fallback_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
                 "expected_outcome": expected_outcome(flow["name"], scenario_type),
                 "test_profile": test_profile_for(persona, channel),
                 "metric_names": metric_names_for(channel),
-                "tags": ["generated", channel, scenario_type, slugify(flow["name"])],
+                "tags": ["generated", channel, scenario_type, slugify(flow["name"])] + (["custom_request"] if request else []),
                 "steps": scenario_steps(flow["name"], scenario_type, channel),
                 "expected_bot_behaviors": expected_behaviors(flow["name"], scenario_type),
                 "failure_conditions": failure_conditions(scenario_type),
@@ -924,10 +945,11 @@ def build_fallback_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
 
     return {
         "id": f"suite_{uuid.uuid4().hex[:10]}",
-        "name": profile.get("bot_name", "Untitled Bot") + " Regression Suite",
+        "name": profile.get("bot_name", "Untitled Bot") + (" Custom Request Suite" if request else " Regression Suite"),
         "created_at": now_iso(),
         "source": "heuristic",
         "bot_profile": profile,
+        "suite_request": request,
         "requested_chat_case_count": desired_count,
         "yellow_ai_target": yellow_ai_target(profile),
         "coverage_matrix": build_coverage_matrix(cases),
@@ -1208,6 +1230,7 @@ def openai_generate_suite(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     model = setting_value("OPENAI_MODEL", "gpt-4.1-mini")
     desired_count = desired_chat_case_count(profile)
+    request = suite_request_text(profile)
     schema = {
         "type": "object",
         "additionalProperties": False,
@@ -1290,7 +1313,8 @@ def openai_generate_suite(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         f"Generate exactly {desired_count} executable chat test cases. "
         "Each test case is an in-house evaluator with instructions, expected outcome, test profile, tags, and metric names. "
         "Use the current bot profile, Yellow.ai target, visible menu options, flows, agents, and KB documents as authoritative. "
-        "Do not create ecommerce/order/refund/cancel/return/order-status cases unless those are explicitly in the current bot scope. "
+        + (f"Tester's specific suite request: {request}. Prioritize this request while staying inside the current bot scope. " if request else "")
+        + "Do not create ecommerce/order/refund/cancel/return/order-status cases unless those are explicitly in the current bot scope. "
         "Cover happy paths, negative paths, missing data, invalid data, user interruptions, fallback recovery, "
         "agent handoff, multilingual behavior when relevant, quick-reply paths, wrong-branch behavior, context retention, and KB/RAG failures. "
         "Return only structured data."
@@ -1345,6 +1369,7 @@ def openai_generate_suite(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     suite["created_at"] = now_iso()
     suite["source"] = "openai"
     suite["bot_profile"] = profile
+    suite["suite_request"] = request
     return suite
 
 
@@ -2141,6 +2166,30 @@ class AppHandler(BaseHTTPRequestHandler):
             error_response(self, "Invalid JSON", 400)
         except ValueError as exc:
             error_response(self, str(exc), 400)
+        except Exception as exc:
+            error_response(self, f"Server error: {exc}", 500)
+        finally:
+            auth_backend.clear_current_user()
+
+    def do_DELETE(self) -> None:
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            user = request_user(self)
+            if not user:
+                return
+            if path.startswith("/api/chats/"):
+                chat_id = path.rsplit("/", 1)[-1]
+                query = parse_qs(parsed.query)
+                state = load_state()
+                project_id = workspace_backend.resolve_project_id(state, query.get("project_id", [""])[0])
+                deleted = workspace_backend.delete_chat(state, project_id, chat_id)
+                save_state(state)
+                json_response(self, {"deleted_chat_id": deleted.get("id", chat_id), "project_id": project_id})
+                return
+            error_response(self, "Not found", 404)
+        except ValueError as exc:
+            error_response(self, str(exc), 404 if "not found" in str(exc).lower() else 400)
         except Exception as exc:
             error_response(self, f"Server error: {exc}", 500)
         finally:

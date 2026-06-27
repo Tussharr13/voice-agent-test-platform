@@ -287,6 +287,14 @@ def create_chat(state: Dict[str, Any], payload: Dict[str, Any]) -> Dict[str, Any
     return chat
 
 
+def delete_chat(state: Dict[str, Any], project_id: str, chat_id: str) -> Dict[str, Any]:
+    resolved_project_id = resolve_project_id(state, project_id)
+    for index, chat in enumerate(state.get("chats", [])):
+        if chat.get("id") == chat_id and chat.get("project_id") == resolved_project_id:
+            return state["chats"].pop(index)
+    raise ValueError("Chat not found")
+
+
 def add_chat_message(
     state: Dict[str, Any],
     chat_id: str,
