@@ -498,6 +498,18 @@ def clamp_int(value: Any, minimum: int, maximum: int, fallback: int) -> int:
 
 def make_chat_title(content: str) -> str:
     title = re.sub(r"\s+", " ", content).strip()
+    report_match = re.search(r"\b(report_[a-zA-Z0-9]+)\b", title)
+    lowered = title.lower()
+    if report_match and any(token in lowered for token in ["pinpoint", "failure", "failed", "summarize", "analyse", "analyze"]):
+        action = "Pinpoint" if "pinpoint" in lowered or "failure" in lowered or "failed" in lowered else "Review"
+        return f"{action} report {report_match.group(1)}"
+    if lowered.startswith("generate") and any(token in lowered for token in ["suite", "test case", "regression"]):
+        cleaned = re.sub(r"^(generate|create|make)\s+", "", title, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+        return f"Test suite: {cleaned[:60]}".strip()
+    if any(token in lowered for token in ["goal-driven", "playwright", "test plan", "test brief"]):
+        cleaned = re.sub(r"\s+", " ", title).strip(" .")
+        return f"Test planning: {cleaned[:56]}".strip()
     return (title[:56] + "...") if len(title) > 59 else title or "New chat"
 
 

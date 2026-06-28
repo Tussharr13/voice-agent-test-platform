@@ -125,6 +125,43 @@ def now_iso() -> str:
     return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
+def timestamp_label(value: Optional[str] = None) -> str:
+    if value:
+        try:
+            normalized = str(value).replace("Z", "+00:00")
+            parsed = datetime.fromisoformat(normalized)
+            return parsed.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return str(value)[:16]
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+
+
+def suite_name(profile: Dict[str, Any], request: str, created_at: str) -> str:
+    bot_name = str(profile.get("bot_name") or "Untitled Bot").strip() or "Untitled Bot"
+    suite_type = "Custom Suite" if request else "Regression Suite"
+    return f"{bot_name} · {suite_type} · {timestamp_label(created_at)}"
+
+
+def run_name(suite: Dict[str, Any], run: Dict[str, Any], channel: str = "chat") -> str:
+    suite_label = str(suite.get("name") or "Generated Suite").strip()
+    channel_label = channel.title()
+    return f"{channel_label} Run · {suite_label} · {timestamp_label(run.get('created_at'))}"
+
+
+def attach_human_labels(output: Dict[str, Any], profile: Dict[str, Any], channel: str = "chat") -> Dict[str, Any]:
+    suite = output.get("suite") or {}
+    run = output.get("run") or {}
+    created_at = suite.get("created_at") or now_iso()
+    request = suite_request_text(profile or {}) or str(suite.get("suite_request") or "").strip()
+    suite["created_at"] = created_at
+    suite["generated_at_label"] = suite.get("generated_at_label") or timestamp_label(created_at)
+    suite["name"] = suite_name(profile or suite.get("bot_profile", {}), request, created_at)
+    if run:
+        run["created_at_label"] = run.get("created_at_label") or timestamp_label(run.get("created_at"))
+        run["name"] = run.get("name") or run_name(suite, run, channel)
+    return output
+
+
 def slugify(value: str) -> str:
     value = value.lower().strip()
     value = re.sub(r"[^a-z0-9]+", "_", value)
@@ -882,6 +919,20 @@ def desired_chat_case_count(profile: Dict[str, Any]) -> int:
     return max(1, min(MAX_CHAT_CASE_COUNT, count))
 
 
+def desired_adaptive_turn_count(profile: Dict[str, Any]) -> int:
+    raw_value = (
+        profile.get("goal_max_turns")
+        or profile.get("chat_max_adaptive_turns")
+        or profile.get("max_adaptive_turns")
+        or 10
+    )
+    try:
+        count = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        count = 10
+    return max(2, min(20, count))
+
+
 def suite_request_text(profile: Dict[str, Any]) -> str:
     for key in ["suite_request", "custom_suite_request", "test_suite_request"]:
         value = re.sub(r"\s+", " ", str(profile.get(key) or "")).strip()
@@ -890,23 +941,12 @@ def suite_request_text(profile: Dict[str, Any]) -> str:
     return ""
 
 
-def requested_flow(profile: Dict[str, Any]) -> Dict[str, str]:
-    request = suite_request_text(profile)
-    if not request:
-        return {}
-    first_sentence = re.split(r"[.\n]", request, maxsplit=1)[0].strip()
-    label = first_sentence[:72].strip(" -,:;") or "Custom requested coverage"
-    return {"name": f"Requested: {label}", "description": request}
-
-
 def build_fallback_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
     channels = ["chat"]
 
     flows = extract_flows(profile)
-    custom_flow = requested_flow(profile)
-    if custom_flow:
-        flows = [custom_flow] + [flow for flow in flows if slugify(flow.get("name", "")) != slugify(custom_flow["name"])]
     desired_count = desired_chat_case_count(profile)
+    turn_budget = desired_adaptive_turn_count(profile)
     request = suite_request_text(profile)
     cases = []
     case_index = 0
@@ -934,7 +974,7 @@ def build_fallback_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
                 "steps": scenario_steps(flow["name"], scenario_type, channel),
                 "expected_bot_behaviors": expected_behaviors(flow["name"], scenario_type),
                 "failure_conditions": failure_conditions(scenario_type),
-                "metrics": base_metrics(channel, scenario_type),
+                "metrics": {**base_metrics(channel, scenario_type), "max_turns": turn_budget},
                 "yellow_ai": yellow_ai,
                 "target": {
                     "chat_endpoint": profile.get("chat_endpoint", ""),
@@ -943,14 +983,17 @@ def build_fallback_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
         )
         case_index += 1
 
+    created_at = now_iso()
     return {
         "id": f"suite_{uuid.uuid4().hex[:10]}",
-        "name": profile.get("bot_name", "Untitled Bot") + (" Custom Request Suite" if request else " Regression Suite"),
-        "created_at": now_iso(),
+        "name": suite_name(profile, request, created_at),
+        "created_at": created_at,
+        "generated_at_label": timestamp_label(created_at),
         "source": "heuristic",
         "bot_profile": profile,
         "suite_request": request,
         "requested_chat_case_count": desired_count,
+        "max_adaptive_turns": turn_budget,
         "yellow_ai_target": yellow_ai_target(profile),
         "coverage_matrix": build_coverage_matrix(cases),
         "test_cases": cases,
@@ -1230,6 +1273,7 @@ def openai_generate_suite(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     model = setting_value("OPENAI_MODEL", "gpt-4.1-mini")
     desired_count = desired_chat_case_count(profile)
+    turn_budget = desired_adaptive_turn_count(profile)
     request = suite_request_text(profile)
     schema = {
         "type": "object",
@@ -1311,6 +1355,7 @@ def openai_generate_suite(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     prompt = (
         "Generate a practical QA regression suite for a Yellow.ai chat bot. "
         f"Generate exactly {desired_count} executable chat test cases. "
+        f"Use up to {turn_budget} user turns per case when the journey needs deeper probing; broad regression cases should usually include at least 6 user turns. "
         "Each test case is an in-house evaluator with instructions, expected outcome, test profile, tags, and metric names. "
         "Use the current bot profile, Yellow.ai target, visible menu options, flows, agents, and KB documents as authoritative. "
         + (f"Tester's specific suite request: {request}. Prioritize this request while staying inside the current bot scope. " if request else "")
@@ -1365,11 +1410,15 @@ def openai_generate_suite(profile: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except json.JSONDecodeError:
         return None
 
+    created_at = now_iso()
     suite["id"] = f"suite_{uuid.uuid4().hex[:10]}"
-    suite["created_at"] = now_iso()
+    suite["created_at"] = created_at
+    suite["generated_at_label"] = timestamp_label(created_at)
+    suite["name"] = suite_name(profile, request, created_at)
     suite["source"] = "openai"
     suite["bot_profile"] = profile
     suite["suite_request"] = request
+    suite["max_adaptive_turns"] = turn_budget
     return suite
 
 
@@ -1423,7 +1472,9 @@ def generate_suite(profile: Dict[str, Any]) -> Dict[str, Any]:
         case.setdefault("test_profile", test_profile_for(persona, channel))
         case.setdefault("metric_names", metric_names_for(channel))
         case.setdefault("tags", ["generated", channel, scenario_type, slugify(flow_name)])
-        case.setdefault("metrics", base_metrics(channel, scenario_type))
+        metrics = case.setdefault("metrics", base_metrics(channel, scenario_type))
+        if isinstance(metrics, dict):
+            metrics["max_turns"] = desired_adaptive_turn_count(profile)
         case.setdefault("yellow_ai", case_yellow_ai_metadata(profile, flow_name, scenario_type, channel))
         case.setdefault(
             "target",
@@ -1449,7 +1500,6 @@ def expected_bot_text_for_script(case: Dict[str, Any], step: Optional[Dict[str, 
         step_expected = compact_script_text(
             step.get("expected_bot_response")
             or step.get("expected_text")
-            or step.get("condition")
         )
         if step_expected:
             return step_expected
@@ -1482,7 +1532,105 @@ def fallback_user_text_for_script(case: Dict[str, Any]) -> str:
     return f"I need help with {goal}."
 
 
-def case_turns_for_script(case: Dict[str, Any]) -> List[Dict[str, str]]:
+def script_turn_budget(suite: Dict[str, Any]) -> int:
+    profile = suite.get("bot_profile", {}) if isinstance(suite.get("bot_profile"), dict) else {}
+    suite_budget = suite.get("max_adaptive_turns")
+    if suite_budget not in [None, ""]:
+        profile = {**profile, "max_adaptive_turns": suite_budget}
+    return desired_adaptive_turn_count(profile)
+
+
+def target_script_turn_count(existing_count: int, max_turns: int) -> int:
+    if existing_count <= 0:
+        return min(max_turns, 6)
+    broad_target = max(6, int(round(max_turns * 0.6)))
+    return min(max_turns, max(existing_count, broad_target))
+
+
+def generic_probe_templates(case: Dict[str, Any]) -> List[str]:
+    flow_name = compact_script_text(case.get("flow_name"), "this request")
+    scenario_type = compact_script_text(case.get("scenario_type"), "").lower()
+    common = [
+        "Can you explain the next step for this request?",
+        "What information do you need from me to continue?",
+        "If I do not have that detail right now, what alternate option can I use?",
+        "Can you summarize what you understood so far?",
+        "What should happen after this step?",
+        "Is there anything else I need to confirm?",
+        "Please continue with the same request.",
+        "Can you give me the final confirmation or next action?",
+    ]
+    scenario_probes = {
+        "happy_path": [
+            f"I want to complete {flow_name} now.",
+            "Yes, the information is correct. Please proceed.",
+            "Can you confirm the request is complete?",
+        ],
+        "missing_information": [
+            "I do not have that information right now.",
+            "Can you continue with another identifier or guide me to find it?",
+            "What is the minimum information needed to proceed?",
+        ],
+        "invalid_information": [
+            "That detail may be incorrect.",
+            "Please tell me the correct format before I retry.",
+            "I will provide the corrected information after you clarify the format.",
+        ],
+        "user_changes_mind": [
+            "Actually, I want to change what I asked for.",
+            "Please keep the context and route me to the right next step.",
+            "Can we continue from here without restarting?",
+        ],
+        "fallback_recovery": [
+            "That was not what I meant.",
+            f"I meant I need help with {flow_name}.",
+            "Please ask a clarifying question instead of ending the chat.",
+        ],
+        "agent_handoff": [
+            "This may need a human support person.",
+            "Please explain when you can hand this over.",
+            "Yes, start the handoff if self-service cannot resolve it.",
+        ],
+    }
+    return scenario_probes.get(scenario_type, []) + common
+
+
+def stable_probe_offset(case: Dict[str, Any]) -> int:
+    seed = "|".join(
+        [
+            str(case.get("id", "")),
+            str(case.get("flow_name", "")),
+            str(case.get("scenario_type", "")),
+            str(case.get("persona", "")),
+        ]
+    )
+    return sum(ord(char) for char in seed)
+
+
+def expand_script_turns(case: Dict[str, Any], turns: List[Dict[str, str]], max_turns: int) -> List[Dict[str, str]]:
+    if not turns:
+        return turns
+    target_count = target_script_turn_count(len(turns), max_turns)
+    if len(turns) >= target_count:
+        return turns[:max_turns]
+
+    existing_users = {turn["user"].strip().lower() for turn in turns if turn.get("user")}
+    probes = generic_probe_templates(case)
+    offset = stable_probe_offset(case)
+    expected = expected_bot_text_for_script(case)
+    probe_index = 0
+    while len(turns) < target_count and probe_index < len(probes) * 2:
+        probe = probes[(offset + probe_index) % len(probes)]
+        probe_index += 1
+        key = probe.strip().lower()
+        if not key or key in existing_users:
+            continue
+        existing_users.add(key)
+        turns.append({"user": probe, "bot": expected})
+    return turns[:max_turns]
+
+
+def case_turns_for_script(case: Dict[str, Any], max_turns: int = 10) -> List[Dict[str, str]]:
     turns = []
     automation_flow = case.get("automation_flow")
     if isinstance(automation_flow, dict):
@@ -1502,7 +1650,7 @@ def case_turns_for_script(case: Dict[str, Any]) -> List[Dict[str, str]]:
                 }
             )
         if turns:
-            return turns[:10]
+            return turns[:max_turns]
 
     for step in case.get("steps", []):
         if not isinstance(step, dict):
@@ -1522,7 +1670,7 @@ def case_turns_for_script(case: Dict[str, Any]) -> List[Dict[str, str]]:
             }
         )
     if turns:
-        return turns[:10]
+        return expand_script_turns(case, turns, max_turns)
     return [
         {
             "user": fallback_user_text_for_script(case),
@@ -1533,6 +1681,7 @@ def case_turns_for_script(case: Dict[str, Any]) -> List[Dict[str, str]]:
 
 def suite_to_chat_automation_script(suite: Dict[str, Any], channel_filter: str = "chat") -> str:
     blocks = []
+    max_turns = script_turn_budget(suite)
     for index, case in enumerate(suite.get("test_cases", []), start=1):
         channel = compact_script_text(case.get("channel"), "chat")
         if channel != "chat":
@@ -1549,7 +1698,7 @@ def suite_to_chat_automation_script(suite: Dict[str, Any], channel_filter: str =
             "#### Conversation Flow",
             "",
         ]
-        for turn_index, turn in enumerate(case_turns_for_script(case), start=1):
+        for turn_index, turn in enumerate(case_turns_for_script(case, max_turns), start=1):
             lines.extend(
                 [
                     f"###### Turn {turn_index}",
@@ -1720,6 +1869,7 @@ def run_suite(suite: Dict[str, Any], channel_filter: str = "all") -> Dict[str, A
     output["run"]["suite_id"] = suite["id"]
     output["report"]["suite_id"] = suite["id"]
     output["run"]["source"] = "playwright_generated_suite"
+    attach_human_labels(output, suite.get("bot_profile", {}), "chat")
     output["report"]["summary"]["source_suite"] = {
         "id": suite["id"],
         "name": suite.get("name", "Generated chat suite"),
@@ -2039,6 +2189,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     ROOT,
                     options,
                 )
+                attach_human_labels(output, profile, "chat")
                 output["suite"]["project_id"] = project_id
                 output["suite"]["yellow_ai_target"] = yellow_ai_target(profile)
                 output["run"]["project_id"] = project_id
@@ -2068,6 +2219,7 @@ class AppHandler(BaseHTTPRequestHandler):
                     ROOT,
                     options,
                 )
+                attach_human_labels(output, profile, "chat")
                 output["suite"]["project_id"] = project_id
                 output["suite"]["yellow_ai_target"] = yellow_ai_target(profile)
                 output["run"]["project_id"] = project_id

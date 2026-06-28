@@ -1,4 +1,98 @@
 var BotQAApp = (() => {
+  // static/workspacePersistence.mjs
+  var WORKSPACE_STATE_KEY = "botqa.workspace.v1";
+  var VALID_TABS = /* @__PURE__ */ new Set(["analyzer", "testing", "docs"]);
+  function defaultStorage() {
+    try {
+      return globalThis.localStorage;
+    } catch (_error) {
+      return null;
+    }
+  }
+  function defaultLocation() {
+    try {
+      return globalThis.location;
+    } catch (_error) {
+      return null;
+    }
+  }
+  function defaultHistory() {
+    try {
+      return globalThis.history;
+    } catch (_error) {
+      return null;
+    }
+  }
+  function safeString(value) {
+    return typeof value === "string" ? value : "";
+  }
+  function sanitizeWorkspaceState(value = {}) {
+    const state = value && typeof value === "object" ? value : {};
+    return {
+      activeTab: VALID_TABS.has(state.activeTab) ? state.activeTab : "analyzer",
+      activeProjectId: safeString(state.activeProjectId),
+      activeChatId: safeString(state.activeChatId),
+      activeDocsChatId: safeString(state.activeDocsChatId)
+    };
+  }
+  function readHashState(locationLike = defaultLocation()) {
+    try {
+      const hash = safeString(locationLike?.hash).replace(/^#/, "");
+      if (!hash) return null;
+      const params = new URLSearchParams(hash);
+      if (!params.has("tab") && !params.has("project") && !params.has("chat") && !params.has("docs")) {
+        return null;
+      }
+      return sanitizeWorkspaceState({
+        activeTab: params.get("tab"),
+        activeProjectId: params.get("project"),
+        activeChatId: params.get("chat"),
+        activeDocsChatId: params.get("docs")
+      });
+    } catch (_error) {
+      return null;
+    }
+  }
+  function readWorkspaceState(storage = defaultStorage(), locationLike = defaultLocation()) {
+    const hashState = readHashState(locationLike);
+    if (hashState) return hashState;
+    try {
+      if (!storage?.getItem) return sanitizeWorkspaceState();
+      const raw = storage.getItem(WORKSPACE_STATE_KEY);
+      return raw ? sanitizeWorkspaceState(JSON.parse(raw)) : sanitizeWorkspaceState();
+    } catch (_error) {
+      return sanitizeWorkspaceState();
+    }
+  }
+  function buildHash(state) {
+    const params = new URLSearchParams();
+    if (state.activeTab) params.set("tab", state.activeTab);
+    if (state.activeProjectId) params.set("project", state.activeProjectId);
+    if (state.activeChatId) params.set("chat", state.activeChatId);
+    if (state.activeDocsChatId) params.set("docs", state.activeDocsChatId);
+    return params.toString();
+  }
+  function writeHashState(state, historyLike = defaultHistory(), locationLike = defaultLocation()) {
+    try {
+      if (!historyLike?.replaceState || !locationLike) return;
+      const hash = buildHash(state);
+      const nextUrl = `${locationLike.pathname || "/"}${locationLike.search || ""}${hash ? `#${hash}` : ""}`;
+      historyLike.replaceState(null, "", nextUrl);
+    } catch (_error) {
+    }
+  }
+  function writeWorkspaceState(state, storage = defaultStorage(), historyLike = defaultHistory(), locationLike = defaultLocation()) {
+    const sanitized = sanitizeWorkspaceState(state);
+    try {
+      if (storage?.setItem) {
+        storage.setItem(WORKSPACE_STATE_KEY, JSON.stringify(sanitized));
+      }
+    } catch (_error) {
+    }
+    writeHashState(sanitized, historyLike, locationLike);
+    return sanitized;
+  }
+
   // static/App.jsx
   var { useEffect, useMemo, useRef, useState } = React;
   var emptyProfile = {
@@ -187,6 +281,13 @@ var BotQAApp = (() => {
     if (label.startsWith("run-")) return "Running suite";
     return label.replace(/-/g, " ");
   }
+  function formatTimestamp(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
+    const pad = (number) => String(number).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  }
   function ToastStack({ toasts, onDismiss }) {
     if (!toasts.length) return null;
     return /* @__PURE__ */ React.createElement("div", { className: "toastStack", "aria-live": "polite" }, toasts.map((toast) => /* @__PURE__ */ React.createElement("div", { key: toast.id, className: cx("toast", toast.tone), role: "status" }, toast.tone === "loading" && /* @__PURE__ */ React.createElement("span", { className: "toastSpinner", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("span", { className: "toastMessage" }, toast.message), toast.tone !== "loading" && /* @__PURE__ */ React.createElement("button", { className: "toastDismiss", type: "button", "aria-label": "Dismiss", onClick: () => onDismiss(toast.id) }, /* @__PURE__ */ React.createElement(Icon, { name: "close" })))));
@@ -196,11 +297,13 @@ var BotQAApp = (() => {
     return /* @__PURE__ */ React.createElement("div", { className: "loadingStatus", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("span", { className: "toastSpinner", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("strong", null, "Loading..."), /* @__PURE__ */ React.createElement("span", null, formatLoadingMessage(loading)));
   }
   function App() {
+    const [initialWorkspaceState] = useState(() => readWorkspaceState());
     const [auth, setAuth] = useState({ loading: true, authenticated: false, user: null });
-    const [activeTab, setActiveTab] = useState("analyzer");
-    const [activeProjectId, setActiveProjectId] = useState("");
-    const [activeChatId, setActiveChatId] = useState("");
-    const [activeDocsChatId, setActiveDocsChatId] = useState("");
+    const [workspaceLoading, setWorkspaceLoading] = useState(false);
+    const [activeTab, setActiveTab] = useState(initialWorkspaceState.activeTab);
+    const [activeProjectId, setActiveProjectId] = useState(initialWorkspaceState.activeProjectId);
+    const [activeChatId, setActiveChatId] = useState(initialWorkspaceState.activeChatId);
+    const [activeDocsChatId, setActiveDocsChatId] = useState(initialWorkspaceState.activeDocsChatId);
     const [projects, setProjects] = useState([]);
     const [chats, setChats] = useState([]);
     const [suites, setSuites] = useState([]);
@@ -220,6 +323,7 @@ var BotQAApp = (() => {
     const [chatToDelete, setChatToDelete] = useState(null);
     const [toasts, setToasts] = useState([]);
     const toastTimers = useRef({});
+    const workspaceReady = useRef(false);
     function addToast(message, tone = "info") {
       const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       setToasts((current) => [...current, { id, message, tone }]);
@@ -247,6 +351,10 @@ var BotQAApp = (() => {
     );
     const analyzerChat = useMemo(() => chats.find((chat) => chat.id === activeChatId), [chats, activeChatId]);
     const docsChat = useMemo(() => chats.find((chat) => chat.id === activeDocsChatId), [chats, activeDocsChatId]);
+    useEffect(() => {
+      if (!workspaceReady.current) return;
+      writeWorkspaceState({ activeTab, activeProjectId, activeChatId, activeDocsChatId });
+    }, [activeTab, activeProjectId, activeChatId, activeDocsChatId]);
     function resetWorkspace() {
       setActiveProjectId("");
       setActiveChatId("");
@@ -265,58 +373,76 @@ var BotQAApp = (() => {
       setProfile(emptyProfile);
       setLatestReport(null);
       setSearch("");
+      workspaceReady.current = false;
+      setWorkspaceLoading(false);
     }
     async function refresh(options = {}) {
-      let projectsPayload;
+      const initialLoad = !workspaceReady.current;
+      if (initialLoad) setWorkspaceLoading(true);
       try {
-        projectsPayload = await api("/api/projects");
-      } catch (err) {
-        if (err.status === 401) {
-          resetWorkspace();
-          setAuth({ loading: false, authenticated: false, user: null });
+        let projectsPayload;
+        try {
+          projectsPayload = await api("/api/projects");
+        } catch (err) {
+          if (err.status === 401) {
+            resetWorkspace();
+            setAuth({ loading: false, authenticated: false, user: null });
+          }
+          throw err;
         }
-        throw err;
+        const nextProjects = projectsPayload.projects || [];
+        const preferredProjectId = Object.prototype.hasOwnProperty.call(options, "projectId") ? options.projectId : activeProjectId;
+        const nextProjectId = preferredProjectId && nextProjects.some((project) => project.id === preferredProjectId) ? preferredProjectId : projectsPayload.active_project_id || nextProjects[0]?.id || "";
+        const [chatsPayload, suitesPayload, runsPayload, docsPayload, snapshotsPayload, accessPayload, voicePayload, docsPagesPayload, configPayload] = await Promise.all([
+          api(projectQuery("/api/chats", nextProjectId)),
+          api(projectQuery("/api/suites", nextProjectId)),
+          api(projectQuery("/api/runs", nextProjectId)),
+          api(projectQuery("/api/documents", nextProjectId)),
+          api(projectQuery("/api/platform-snapshots", nextProjectId)),
+          api(projectQuery("/api/project-access", nextProjectId)),
+          api(projectQuery("/api/voice", nextProjectId)),
+          api("/api/docs/pages"),
+          api("/api/config")
+        ]);
+        setProjects(nextProjects);
+        setActiveProjectId(nextProjectId);
+        setChats(chatsPayload.chats || []);
+        setSuites(suitesPayload || []);
+        setRuns(runsPayload || []);
+        setDocuments(docsPayload.documents || []);
+        setChangePlans(docsPayload.change_plans || []);
+        setPlatformSnapshots(snapshotsPayload.snapshots || []);
+        setYellowAccess(accessPayload);
+        setVoiceData(voicePayload);
+        setDocsPages(docsPagesPayload.pages || []);
+        setConfig(configPayload);
+        const nextProject = nextProjects.find((project) => project.id === nextProjectId) || nextProjects[0];
+        setProfile({ ...emptyProfile, ...nextProject?.bot_profile || {} });
+        const preferredAnalyzerId = Object.prototype.hasOwnProperty.call(options, "activeChatId") ? options.activeChatId : activeChatId;
+        const preferredDocsChatId = Object.prototype.hasOwnProperty.call(options, "activeDocsChatId") ? options.activeDocsChatId : activeDocsChatId;
+        const analyzer = (chatsPayload.chats || []).find((chat) => chat.id === preferredAnalyzerId && chat.mode === "analyzer") || (chatsPayload.chats || []).find((chat) => chat.mode === "analyzer");
+        const docs = (chatsPayload.chats || []).find((chat) => chat.id === preferredDocsChatId && chat.mode === "docs") || (chatsPayload.chats || []).find((chat) => chat.mode === "docs");
+        const nextAnalyzerId = analyzer?.id || "";
+        const nextDocsId = docs?.id || "";
+        setActiveChatId(nextAnalyzerId);
+        setActiveDocsChatId(nextDocsId);
+        if (!options.keepReport) setLatestReport(null);
+        workspaceReady.current = true;
+        writeWorkspaceState({ activeTab, activeProjectId: nextProjectId, activeChatId: nextAnalyzerId, activeDocsChatId: nextDocsId });
+      } finally {
+        if (initialLoad) setWorkspaceLoading(false);
       }
-      const nextProjects = projectsPayload.projects || [];
-      const nextProjectId = options.projectId || (activeProjectId && nextProjects.some((project) => project.id === activeProjectId) ? activeProjectId : projectsPayload.active_project_id || nextProjects[0]?.id || "");
-      const [chatsPayload, suitesPayload, runsPayload, docsPayload, snapshotsPayload, accessPayload, voicePayload, docsPagesPayload, configPayload] = await Promise.all([
-        api(projectQuery("/api/chats", nextProjectId)),
-        api(projectQuery("/api/suites", nextProjectId)),
-        api(projectQuery("/api/runs", nextProjectId)),
-        api(projectQuery("/api/documents", nextProjectId)),
-        api(projectQuery("/api/platform-snapshots", nextProjectId)),
-        api(projectQuery("/api/project-access", nextProjectId)),
-        api(projectQuery("/api/voice", nextProjectId)),
-        api("/api/docs/pages"),
-        api("/api/config")
-      ]);
-      setProjects(nextProjects);
-      setActiveProjectId(nextProjectId);
-      setChats(chatsPayload.chats || []);
-      setSuites(suitesPayload || []);
-      setRuns(runsPayload || []);
-      setDocuments(docsPayload.documents || []);
-      setChangePlans(docsPayload.change_plans || []);
-      setPlatformSnapshots(snapshotsPayload.snapshots || []);
-      setYellowAccess(accessPayload);
-      setVoiceData(voicePayload);
-      setDocsPages(docsPagesPayload.pages || []);
-      setConfig(configPayload);
-      const nextProject = nextProjects.find((project) => project.id === nextProjectId) || nextProjects[0];
-      setProfile({ ...emptyProfile, ...nextProject?.bot_profile || {} });
-      const preferredAnalyzerId = Object.prototype.hasOwnProperty.call(options, "activeChatId") ? options.activeChatId : activeChatId;
-      const preferredDocsChatId = Object.prototype.hasOwnProperty.call(options, "activeDocsChatId") ? options.activeDocsChatId : activeDocsChatId;
-      const analyzer = (chatsPayload.chats || []).find((chat) => chat.id === preferredAnalyzerId && chat.mode === "analyzer") || (chatsPayload.chats || []).find((chat) => chat.mode === "analyzer");
-      const docs = (chatsPayload.chats || []).find((chat) => chat.id === preferredDocsChatId && chat.mode === "docs") || (chatsPayload.chats || []).find((chat) => chat.mode === "docs");
-      setActiveChatId(analyzer?.id || "");
-      setActiveDocsChatId(docs?.id || "");
-      if (!options.keepReport) setLatestReport(null);
     }
     useEffect(() => {
       api("/api/auth/session").then(async (session) => {
         setAuth({ loading: false, authenticated: !!session.authenticated, user: session.user || null });
         if (session.authenticated) {
-          await refresh({ keepReport: false });
+          await refresh({
+            keepReport: false,
+            projectId: initialWorkspaceState.activeProjectId,
+            activeChatId: initialWorkspaceState.activeChatId,
+            activeDocsChatId: initialWorkspaceState.activeDocsChatId
+          });
         }
       }).catch((err) => {
         setAuth({ loading: false, authenticated: false, user: null });
@@ -325,7 +451,12 @@ var BotQAApp = (() => {
     }, []);
     async function handleAuthenticated(session) {
       setAuth({ loading: false, authenticated: true, user: session.user });
-      await refresh({ keepReport: false });
+      await refresh({
+        keepReport: false,
+        projectId: initialWorkspaceState.activeProjectId,
+        activeChatId: initialWorkspaceState.activeChatId,
+        activeDocsChatId: initialWorkspaceState.activeDocsChatId
+      });
     }
     async function logout() {
       await guarded("logout", async () => {
@@ -614,10 +745,13 @@ var BotQAApp = (() => {
       });
     }
     if (auth.loading) {
-      return /* @__PURE__ */ React.createElement(SplashScreen, null);
+      return /* @__PURE__ */ React.createElement(SplashScreen, { message: "Checking your session" });
     }
     if (!auth.authenticated) {
       return /* @__PURE__ */ React.createElement(AuthScreen, { onAuthenticated: handleAuthenticated });
+    }
+    if (workspaceLoading) {
+      return /* @__PURE__ */ React.createElement(SplashScreen, { message: "Restoring projects, chats, tests, and reports", detail: "Your last workspace context will open automatically." });
     }
     return /* @__PURE__ */ React.createElement("div", { className: "appShell" }, /* @__PURE__ */ React.createElement(
       Sidebar,
@@ -724,8 +858,8 @@ var BotQAApp = (() => {
       }
     ), /* @__PURE__ */ React.createElement(ToastStack, { toasts, onDismiss: dismissToast }), /* @__PURE__ */ React.createElement(SettingsDialog, { config, setConfig, onError: notifyError }));
   }
-  function SplashScreen() {
-    return /* @__PURE__ */ React.createElement("main", { className: "authShell" }, /* @__PURE__ */ React.createElement("section", { className: "authCard compact" }, /* @__PURE__ */ React.createElement("div", { className: "authBrand" }, /* @__PURE__ */ React.createElement("div", { className: "brandMark" }, "QA"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", null, "QA Workbench"), /* @__PURE__ */ React.createElement("p", null, "Loading workspace")))));
+  function SplashScreen({ message = "Loading workspace", detail = "Preparing your bot QA workbench." }) {
+    return /* @__PURE__ */ React.createElement("main", { className: "authShell" }, /* @__PURE__ */ React.createElement("section", { className: "authCard compact" }, /* @__PURE__ */ React.createElement("div", { className: "authBrand" }, /* @__PURE__ */ React.createElement("div", { className: "brandMark" }, "QA"), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h1", null, "QA Workbench"), /* @__PURE__ */ React.createElement("p", null, message))), /* @__PURE__ */ React.createElement("div", { className: "workspaceLoader", role: "status", "aria-live": "polite" }, /* @__PURE__ */ React.createElement("span", { className: "workspaceLoaderSpinner", "aria-hidden": "true" }), /* @__PURE__ */ React.createElement("span", null, detail))));
   }
   function AuthScreen({ onAuthenticated }) {
     const [mode, setMode] = useState("login");
@@ -769,7 +903,7 @@ var BotQAApp = (() => {
       ["analyzer", "analytics", "Analyzer"],
       ["testing", "science", "Testing"],
       ["docs", "description", "Docs"]
-    ].map(([tab, icon, label]) => /* @__PURE__ */ React.createElement("button", { key: tab, className: cx("navButton", props.activeTab === tab && "active"), type: "button", onClick: () => props.setActiveTab(tab) }, /* @__PURE__ */ React.createElement(Icon, { name: icon, filled: props.activeTab === tab }), " ", label))), showChats && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("label", { className: "sideSearch" }, "Search", /* @__PURE__ */ React.createElement("input", { value: props.search, onChange: (event) => props.setSearch(event.target.value), placeholder: "Search chats" })), /* @__PURE__ */ React.createElement(SectionTitle, { label: "Chats" }), /* @__PURE__ */ React.createElement("div", { className: "sideList chatList" }, filteredChats.length ? filteredChats.map((chat) => /* @__PURE__ */ React.createElement("div", { key: chat.id, className: cx("chatListItem", chat.id === props.activeChatId && "active") }, /* @__PURE__ */ React.createElement("button", { className: "chatSelectButton", type: "button", onClick: () => props.setChat(chat) }, /* @__PURE__ */ React.createElement("span", null, chat.title), /* @__PURE__ */ React.createElement("small", null, chat.mode)), /* @__PURE__ */ React.createElement("button", { className: "chatDeleteButton", type: "button", "aria-label": `Delete ${chat.title}`, title: "Delete chat", onClick: () => props.deleteChat(chat) }, /* @__PURE__ */ React.createElement(Icon, { name: "delete" })))) : /* @__PURE__ */ React.createElement("div", { className: "sideEmpty" }, "No ", mode, " chats yet"))));
+    ].map(([tab, icon, label]) => /* @__PURE__ */ React.createElement("button", { key: tab, className: cx("navButton", props.activeTab === tab && "active"), type: "button", onClick: () => props.setActiveTab(tab) }, /* @__PURE__ */ React.createElement(Icon, { name: icon, filled: props.activeTab === tab }), " ", label))), showChats && /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("label", { className: "sideSearch" }, "Search", /* @__PURE__ */ React.createElement("input", { value: props.search, onChange: (event) => props.setSearch(event.target.value), placeholder: "Search chats" })), /* @__PURE__ */ React.createElement(SectionTitle, { label: "Chats" }), /* @__PURE__ */ React.createElement("div", { className: "sideList chatList" }, filteredChats.length ? filteredChats.map((chat) => /* @__PURE__ */ React.createElement("div", { key: chat.id, className: cx("chatListItem", chat.id === props.activeChatId && "active") }, /* @__PURE__ */ React.createElement("button", { className: "chatSelectButton", type: "button", onClick: () => props.setChat(chat) }, /* @__PURE__ */ React.createElement("span", null, chat.title), /* @__PURE__ */ React.createElement("small", null, [chat.mode, formatTimestamp(chat.updated_at || chat.created_at)].filter(Boolean).join(" \xB7 "))), /* @__PURE__ */ React.createElement("button", { className: "chatDeleteButton", type: "button", "aria-label": `Delete ${chat.title}`, title: "Delete chat", onClick: () => props.deleteChat(chat) }, /* @__PURE__ */ React.createElement(Icon, { name: "delete" })))) : /* @__PURE__ */ React.createElement("div", { className: "sideEmpty" }, "No ", mode, " chats yet"))));
   }
   function SectionTitle({ label }) {
     return /* @__PURE__ */ React.createElement("div", { className: "sideSectionHeader" }, label);
@@ -991,7 +1125,7 @@ var BotQAApp = (() => {
     const latestSnapshot = platformSnapshots[0];
     const goalBrief = activeProject?.goal_test_brief;
     const botDiscovery = activeProject?.bot_discovery;
-    return /* @__PURE__ */ React.createElement("div", { className: "contextStack" }, /* @__PURE__ */ React.createElement("div", { className: "metricGrid" }, /* @__PURE__ */ React.createElement(Metric, { label: "Docs", value: documents.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Plans", value: changePlans.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Suites", value: suites.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Snapshots", value: platformSnapshots.length })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Yellow.ai Target"), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, Object.keys(target).length ? Object.entries(target).map(([key, value]) => /* @__PURE__ */ React.createElement(Pill, { key }, key.replaceAll("_", " "), ": ", value)) : /* @__PURE__ */ React.createElement(Pill, null, "No target saved"))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Bot Discovery"), botDiscovery?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "discovered"), /* @__PURE__ */ React.createElement(Pill, null, botDiscovery.id)), /* @__PURE__ */ React.createElement("p", null, botDiscovery.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No bot discovery", text: "Save bot access, then run Discover bot to build project context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Provider Status"), /* @__PURE__ */ React.createElement("div", { className: "statusRows" }, /* @__PURE__ */ React.createElement(StatusRow, { label: "OpenAI", ready: config?.openai?.configured, value: config?.openai?.provider || "openai" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Playwright", ready: config?.playwright?.available, value: config?.playwright?.package || "browser runner" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Yellow.ai Access", ready: Boolean(yellowAccess?.bot_id && yellowAccess?.api_key_configured), value: yellowAccess?.bot_id || "ask in chat" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Platform Snapshot", ready: config?.platform_snapshot?.available, value: config?.platform_snapshot?.package || "crawler" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Storage", ready: config?.storage?.configured, value: config?.storage?.provider || "local_json" }))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Latest Platform Snapshot"), latestSnapshot ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: latestSnapshot.status === "ok" ? "ok" : "warn" }, latestSnapshot.status), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.page_count || 0, " pages"), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.network_event_count || 0, " network signals")), /* @__PURE__ */ React.createElement("p", null, latestSnapshot.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No platform snapshot", text: "Run a read-only Yellow.ai snapshot to attach agents, workflows, tools, and KB context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Goal Test Brief"), goalBrief?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "ready"), /* @__PURE__ */ React.createElement(Pill, null, goalBrief.max_turns || 10, " turns")), /* @__PURE__ */ React.createElement("p", null, goalBrief.title || goalBrief.goal)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No goal brief", text: "Use Analyzer to prepare an adaptive test brief for the Testing tab." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Next steps"), /* @__PURE__ */ React.createElement("ul", { className: "compactList" }, /* @__PURE__ */ React.createElement("li", null, latestSnapshot ? `Use ${latestSnapshot.id} for failure root-cause analysis.` : "Run a platform snapshot to attach Studio context automatically."), /* @__PURE__ */ React.createElement("li", null, goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare a goal-driven test brief from Analyzer."), /* @__PURE__ */ React.createElement("li", null, runs[0] ? `Open latest report ${runs[0].report_id}` : "Run a real web-widget chat automation script."))));
+    return /* @__PURE__ */ React.createElement("div", { className: "contextStack" }, /* @__PURE__ */ React.createElement("div", { className: "metricGrid" }, /* @__PURE__ */ React.createElement(Metric, { label: "Docs", value: documents.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Plans", value: changePlans.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Suites", value: suites.length }), /* @__PURE__ */ React.createElement(Metric, { label: "Snapshots", value: platformSnapshots.length })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Yellow.ai Target"), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, Object.keys(target).length ? Object.entries(target).map(([key, value]) => /* @__PURE__ */ React.createElement(Pill, { key }, key.replaceAll("_", " "), ": ", value)) : /* @__PURE__ */ React.createElement(Pill, null, "No target saved"))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Bot Discovery"), botDiscovery?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "discovered"), /* @__PURE__ */ React.createElement(Pill, null, botDiscovery.id)), /* @__PURE__ */ React.createElement("p", null, botDiscovery.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No bot discovery", text: "Save bot access, then run Discover bot to build project context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Provider Status"), /* @__PURE__ */ React.createElement("div", { className: "statusRows" }, /* @__PURE__ */ React.createElement(StatusRow, { label: "OpenAI", ready: config?.openai?.configured, value: config?.openai?.provider || "openai" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Playwright", ready: config?.playwright?.available, value: config?.playwright?.package || "browser runner" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Yellow.ai Access", ready: Boolean(yellowAccess?.bot_id && yellowAccess?.api_key_configured), value: yellowAccess?.bot_id || "ask in chat" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Platform Snapshot", ready: config?.platform_snapshot?.available, value: config?.platform_snapshot?.package || "crawler" }), /* @__PURE__ */ React.createElement(StatusRow, { label: "Storage", ready: config?.storage?.configured, value: config?.storage?.provider || "local_json" }))), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Latest Platform Snapshot"), latestSnapshot ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: latestSnapshot.status === "ok" ? "ok" : "warn" }, latestSnapshot.status), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.page_count || 0, " pages"), /* @__PURE__ */ React.createElement(Pill, null, latestSnapshot.network_event_count || 0, " network signals")), /* @__PURE__ */ React.createElement("p", null, latestSnapshot.summary)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No platform snapshot", text: "Run a read-only Yellow.ai snapshot to attach agents, workflows, tools, and KB context automatically." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Goal Test Brief"), goalBrief?.id ? /* @__PURE__ */ React.createElement("div", { className: "snapshotSummary" }, /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "ready"), /* @__PURE__ */ React.createElement(Pill, null, goalBrief.max_turns || 10, " turns")), /* @__PURE__ */ React.createElement("p", null, goalBrief.title || goalBrief.goal)) : /* @__PURE__ */ React.createElement(EmptyState, { title: "No goal brief", text: "Use Analyzer to prepare an adaptive Playwright brief for the Testing Lab." })), /* @__PURE__ */ React.createElement("div", { className: "contextBlock" }, /* @__PURE__ */ React.createElement("h3", null, "Next steps"), /* @__PURE__ */ React.createElement("ul", { className: "compactList" }, /* @__PURE__ */ React.createElement("li", null, latestSnapshot ? `Use ${latestSnapshot.id} for failure root-cause analysis.` : "Run a platform snapshot to attach Studio context automatically."), /* @__PURE__ */ React.createElement("li", null, goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare an adaptive Playwright brief from Analyzer."), /* @__PURE__ */ React.createElement("li", null, runs[0] ? `Open latest report ${runs[0].report_id}` : "Run a real web-widget chat automation script."))));
   }
   function suiteChannelCount(suite, channel) {
     return (suite.test_cases || []).filter((item) => item.channel === channel).length;
@@ -1050,7 +1184,7 @@ var BotQAApp = (() => {
     useEffect(() => {
       runsScrollRef.current?.scrollTo({ top: 0 });
     }, [activeRuns[0]?.id]);
-    return /* @__PURE__ */ React.createElement("div", { className: "testingStack" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel testingModePanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Testing Workspace" }), /* @__PURE__ */ React.createElement("div", { className: "testingChannelTabs" }, /* @__PURE__ */ React.createElement("button", { className: testMode === "chat" ? "active" : "", type: "button", onClick: () => setTestMode("chat") }, /* @__PURE__ */ React.createElement(Icon, { name: "chat", filled: true }), " Chat Testing"), /* @__PURE__ */ React.createElement("button", { className: testMode === "voice" ? "active" : "", type: "button", onClick: () => setTestMode("voice") }, /* @__PURE__ */ React.createElement(Icon, { name: "call", filled: true }), " Voice Call Analysis")), /* @__PURE__ */ React.createElement("div", { className: "testingModeSummary" }, modeSummary.map(([label, value]) => /* @__PURE__ */ React.createElement(Metric, { key: label, label, value })))), testMode === "chat" ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("div", { className: "mainGrid testingGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Bot Core Config" }), /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "testingStack" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel testingModePanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Testing Workspace" }), /* @__PURE__ */ React.createElement("div", { className: "testingChannelTabs" }, /* @__PURE__ */ React.createElement("button", { className: testMode === "chat" ? "active" : "", type: "button", onClick: () => setTestMode("chat") }, /* @__PURE__ */ React.createElement(Icon, { name: "chat", filled: true }), " Chat Testing"), /* @__PURE__ */ React.createElement("button", { className: testMode === "voice" ? "active" : "", type: "button", onClick: () => setTestMode("voice") }, /* @__PURE__ */ React.createElement(Icon, { name: "call", filled: true }), " Voice Call Analysis")), /* @__PURE__ */ React.createElement("div", { className: "testingModeSummary" }, modeSummary.map(([label, value]) => /* @__PURE__ */ React.createElement(Metric, { key: label, label, value })))), testMode === "chat" ? /* @__PURE__ */ React.createElement(React.Fragment, null, /* @__PURE__ */ React.createElement("section", { className: "workPanel testingLabPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Playwright Testing Lab", meta: "Generate suites and run live chat tests from one place" }), /* @__PURE__ */ React.createElement("div", { className: "testingLabGrid" }, /* @__PURE__ */ React.createElement(
       BotCoreConfig,
       {
         profile,
@@ -1060,7 +1194,7 @@ var BotQAApp = (() => {
         generateSuiteLabel: "Generate Chat Suite",
         loading
       }
-    )), /* @__PURE__ */ React.createElement("section", { className: "workPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Run Chat Tests" }), /* @__PURE__ */ React.createElement(
+    ), /* @__PURE__ */ React.createElement(
       ChatAutomationPanel,
       {
         profile,
@@ -1071,7 +1205,7 @@ var BotQAApp = (() => {
         config,
         loading
       }
-    ))), /* @__PURE__ */ React.createElement("div", { className: "mainGrid testingGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel scrollPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Chat Suites", meta: `${activeSuites.length} TOTAL` }), /* @__PURE__ */ React.createElement("div", { className: "scrollRegion" }, /* @__PURE__ */ React.createElement(SuiteList, { suites: activeSuites, channel: testChannel, runSuite, loading }))), /* @__PURE__ */ React.createElement("section", { className: "workPanel scrollPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Chat Runs", meta: `${activeRuns.length} RECENT` }), /* @__PURE__ */ React.createElement("div", { className: "scrollRegion", ref: runsScrollRef }, /* @__PURE__ */ React.createElement(RunList, { runs: activeRuns, channel: testChannel, openReport })))), /* @__PURE__ */ React.createElement("section", { className: "workPanel reportPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Chat Report", meta: activeReport?.id || "NO REPORT SELECTED" }), /* @__PURE__ */ React.createElement(ReportView, { report: activeReport, channel: testChannel }))) : /* @__PURE__ */ React.createElement(
+    ))), /* @__PURE__ */ React.createElement("div", { className: "mainGrid testingGrid" }, /* @__PURE__ */ React.createElement("section", { className: "workPanel scrollPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Chat Suites", meta: `${activeSuites.length} TOTAL` }), /* @__PURE__ */ React.createElement("div", { className: "scrollRegion" }, /* @__PURE__ */ React.createElement(SuiteList, { suites: activeSuites, channel: testChannel, runSuite, loading }))), /* @__PURE__ */ React.createElement("section", { className: "workPanel scrollPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Chat Runs", meta: `${activeRuns.length} RECENT` }), /* @__PURE__ */ React.createElement("div", { className: "scrollRegion", ref: runsScrollRef }, /* @__PURE__ */ React.createElement(RunList, { runs: activeRuns, suites: activeSuites, channel: testChannel, openReport })))), /* @__PURE__ */ React.createElement("section", { className: "workPanel reportPanel" }, /* @__PURE__ */ React.createElement(PanelHeader, { title: "Chat Report", meta: activeReport?.id || "NO REPORT SELECTED" }), /* @__PURE__ */ React.createElement(ReportView, { report: activeReport, channel: testChannel }))) : /* @__PURE__ */ React.createElement(
       VoiceAnalysisWorkspace,
       {
         voiceData,
@@ -1147,19 +1281,19 @@ var BotQAApp = (() => {
     const [constraints, setConstraints] = useState("Use realistic user replies. Do not switch language unless the user explicitly asks. Continue until the journey reaches success, a clear bot-side failure, a loop, or a restart.");
     const [testData, setTestData] = useState("Name: Test User. Purchase source: Amazon. Order ID: Not Available. Product category: Water Purifier. Product: Kent Grand Plus. Pincode: 560102. Address: Flat 101, Test Apartments, HSR Layout, Bengaluru. Confirmation: Confirm. Date preference: Tomorrow.");
     const [successCriteria, setSuccessCriteria] = useState("The bot should keep the same journey, collect required details one by one, ask for confirmation when needed, and give a positive closure after confirmation.");
-    const [maxTurns, setMaxTurns] = useState("18");
     const lastAppliedBriefId = useRef("");
     const playwright = config?.playwright || {};
     const turnsInScript = scriptTurnCount(script);
     const scriptIsShort = turnsInScript > 0 && turnsInScript < 6;
     const update = (key, value) => setProfile((current) => ({ ...current, [key]: value }));
+    const maxTurns = profile.goal_max_turns || profile.chat_max_adaptive_turns || "18";
     function applyGoalBrief(brief) {
       if (!brief) return;
       setGoal(brief.goal || "");
       setConstraints(brief.constraints || "");
       setTestData(brief.test_data || "");
       setSuccessCriteria(brief.success_criteria || "");
-      setMaxTurns(String(brief.max_turns || "10"));
+      update("goal_max_turns", String(brief.max_turns || maxTurns || "18"));
     }
     useEffect(() => {
       if (!goalBrief?.id || goalBrief.id === lastAppliedBriefId.current) return;
@@ -1173,7 +1307,7 @@ var BotQAApp = (() => {
       reader.readAsText(file);
     }
     const endpointReady = Boolean((profile.chat_endpoint || "").trim());
-    return /* @__PURE__ */ React.createElement("div", { className: "automationPanel" }, /* @__PURE__ */ React.createElement("div", { className: "automationHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", null, "Chat Automation"), /* @__PURE__ */ React.createElement("p", null, "Goal-driven exploration or Markdown scripts run through the configured web widget and produce scenario-level project reports.")), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: playwright.available ? "ok" : "warn" }, playwright.available ? "Playwright ready" : "Playwright setup"), /* @__PURE__ */ React.createElement(Pill, { tone: endpointReady ? "ok" : "warn" }, endpointReady ? "URL ready" : "URL missing"))), /* @__PURE__ */ React.createElement("section", { className: "goalRunnerPanel" }, /* @__PURE__ */ React.createElement("div", { className: "sectionTitleRow" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h4", null, "Goal-Driven Test"), /* @__PURE__ */ React.createElement("p", null, "Describe the journey once. The tester observes bot replies, chooses clicks/messages adaptively, and stops on success, loop, or failure.")), /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "Adaptive")), goalBrief?.id && /* @__PURE__ */ React.createElement("div", { className: "briefNotice" }, /* @__PURE__ */ React.createElement(Icon, { name: "assignment_turned_in" }), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("strong", null, goalBrief.title || "Analyzer test brief loaded"), /* @__PURE__ */ React.createElement("span", null, goalBrief.reasoning || "Prepared from the current analyzer chat, reports, docs, and platform context.")), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton compactButton", type: "button", onClick: () => applyGoalBrief(goalBrief) }, "Reload fields")), /* @__PURE__ */ React.createElement(Field, { label: "Test goal" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: goal, onChange: (event) => setGoal(event.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "twoCol" }, /* @__PURE__ */ React.createElement(Field, { label: "Constraints" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: constraints, onChange: (event) => setConstraints(event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Test data" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: testData, onChange: (event) => setTestData(event.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "twoCol" }, /* @__PURE__ */ React.createElement(Field, { label: "Success criteria" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: successCriteria, onChange: (event) => setSuccessCriteria(event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Max adaptive turns" }, /* @__PURE__ */ React.createElement("input", { type: "number", min: "2", max: "20", inputMode: "numeric", value: maxTurns, onChange: (event) => setMaxTurns(event.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "automationActions" }, /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "automationPanel" }, /* @__PURE__ */ React.createElement("div", { className: "automationHeader" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", null, "Adaptive Playwright Runner"), /* @__PURE__ */ React.createElement("p", null, "Run one adaptive web-widget journey and produce a report.")), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: playwright.available ? "ok" : "warn" }, playwright.available ? "Playwright ready" : "Playwright setup"), /* @__PURE__ */ React.createElement(Pill, { tone: endpointReady ? "ok" : "warn" }, endpointReady ? "URL ready" : "URL missing"))), /* @__PURE__ */ React.createElement("section", { className: "goalRunnerPanel" }, /* @__PURE__ */ React.createElement("div", { className: "sectionTitleRow" }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h4", null, "Goal-Driven Test"), /* @__PURE__ */ React.createElement("p", null, "Give the intent, data, and pass criteria. The runner adapts turn by turn.")), /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "Adaptive")), goalBrief?.id && /* @__PURE__ */ React.createElement("div", { className: "briefNotice" }, /* @__PURE__ */ React.createElement(Icon, { name: "assignment_turned_in" }), /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("strong", null, goalBrief.title || "Analyzer test brief loaded"), /* @__PURE__ */ React.createElement("span", null, goalBrief.reasoning || "Prepared from the current analyzer chat, reports, docs, and platform context.")), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton compactButton", type: "button", onClick: () => applyGoalBrief(goalBrief) }, "Reload fields")), /* @__PURE__ */ React.createElement(Field, { label: "Test goal" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: goal, onChange: (event) => setGoal(event.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "twoCol" }, /* @__PURE__ */ React.createElement(Field, { label: "Constraints" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: constraints, onChange: (event) => setConstraints(event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Test data" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: testData, onChange: (event) => setTestData(event.target.value) }))), /* @__PURE__ */ React.createElement(Field, { label: "Success criteria" }, /* @__PURE__ */ React.createElement("textarea", { className: "compactTextarea", value: successCriteria, onChange: (event) => setSuccessCriteria(event.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "automationActions" }, /* @__PURE__ */ React.createElement(
       "button",
       {
         type: "button",
@@ -1195,7 +1329,7 @@ var BotQAApp = (() => {
   function BotCoreConfig({ profile, setProfile, saveProfile, generateSuite, generateSuiteLabel = "Generate Test Suite", loading }) {
     const [showSuiteRequest, setShowSuiteRequest] = useState(Boolean(profile.suite_request));
     const update = (key, value) => setProfile((current) => ({ ...current, [key]: value }));
-    return /* @__PURE__ */ React.createElement("div", { className: "configForm" }, /* @__PURE__ */ React.createElement("div", { className: "twoCol" }, /* @__PURE__ */ React.createElement(Field, { label: "Bot name" }, /* @__PURE__ */ React.createElement("input", { value: profile.bot_name || "", onChange: (event) => update("bot_name", event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Chat cases to generate" }, /* @__PURE__ */ React.createElement(
+    return /* @__PURE__ */ React.createElement("div", { className: "configForm" }, /* @__PURE__ */ React.createElement("div", { className: "labFieldGrid" }, /* @__PURE__ */ React.createElement(Field, { label: "Bot name" }, /* @__PURE__ */ React.createElement("input", { value: profile.bot_name || "", onChange: (event) => update("bot_name", event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Chat cases to generate" }, /* @__PURE__ */ React.createElement(
       "input",
       {
         type: "number",
@@ -1205,7 +1339,20 @@ var BotQAApp = (() => {
         value: profile.chat_case_count || "12",
         onChange: (event) => update("chat_case_count", event.target.value)
       }
-    ))), /* @__PURE__ */ React.createElement(Field, { label: "Chat endpoint / widget URL" }, /* @__PURE__ */ React.createElement("input", { value: profile.chat_endpoint || "", onChange: (event) => update("chat_endpoint", event.target.value), placeholder: "https://..." })), /* @__PURE__ */ React.createElement(Field, { label: "Business goal" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.business_goal || "", onChange: (event) => update("business_goal", event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Journeys / risks to cover" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.flow_docs || "", onChange: (event) => update("flow_docs", event.target.value) })), /* @__PURE__ */ React.createElement("div", { className: "suiteRequestToggleRow" }, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => setShowSuiteRequest((current) => !current) }, /* @__PURE__ */ React.createElement(Icon, { name: showSuiteRequest ? "expand_less" : "tune" }), " ", showSuiteRequest ? "Hide specific request" : "Specific suite request"), profile.suite_request && /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "custom request active")), showSuiteRequest && /* @__PURE__ */ React.createElement("div", { className: "suiteRequestPanel" }, /* @__PURE__ */ React.createElement(Field, { label: "What specific tests or suite do you need?" }, /* @__PURE__ */ React.createElement(
+    )), /* @__PURE__ */ React.createElement(Field, { label: "Max adaptive turns" }, /* @__PURE__ */ React.createElement(
+      "input",
+      {
+        type: "number",
+        min: "2",
+        max: "20",
+        inputMode: "numeric",
+        value: profile.goal_max_turns || profile.chat_max_adaptive_turns || "18",
+        onChange: (event) => {
+          update("goal_max_turns", event.target.value);
+          update("chat_max_adaptive_turns", event.target.value);
+        }
+      }
+    )), /* @__PURE__ */ React.createElement(Field, { label: "Chat endpoint / widget URL" }, /* @__PURE__ */ React.createElement("input", { value: profile.chat_endpoint || "", onChange: (event) => update("chat_endpoint", event.target.value), placeholder: "https://..." }))), /* @__PURE__ */ React.createElement("section", { className: "suiteRequestBlock" }, /* @__PURE__ */ React.createElement("div", { className: "suiteRequestToggleRow" }, /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => setShowSuiteRequest((current) => !current) }, /* @__PURE__ */ React.createElement(Icon, { name: showSuiteRequest ? "expand_less" : "tune" }), " ", showSuiteRequest ? "Hide request" : "Specific suite request"), profile.suite_request && /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, "custom request active")), showSuiteRequest && /* @__PURE__ */ React.createElement("div", { className: "suiteRequestPanel" }, /* @__PURE__ */ React.createElement(Field, { label: "What specific tests or suite do you need?" }, /* @__PURE__ */ React.createElement(
       "textarea",
       {
         className: "compactTextarea",
@@ -1213,7 +1360,7 @@ var BotQAApp = (() => {
         onChange: (event) => update("suite_request", event.target.value),
         placeholder: "Example: Create 8 installation booking cases focused on language persistence, pincode validation, confirmation after address capture, fallback recovery, and positive closure."
       }
-    )), /* @__PURE__ */ React.createElement("p", { className: "fieldHint" }, "This request is used only for suite generation. The bot profile and discovered Yellow.ai context still stay as the source of truth.")), /* @__PURE__ */ React.createElement("div", { className: "buttonRow" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: generateSuite, disabled: loading === "generate-suite" }, /* @__PURE__ */ React.createElement(Icon, { name: "play_arrow" }), " ", generateSuiteLabel), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: saveProfile, disabled: loading === "save-profile" }, "Save Project Profile")));
+    )), /* @__PURE__ */ React.createElement("p", { className: "fieldHint" }, "Used only for suite generation. Bot profile and Yellow.ai context stay as the source of truth."))), /* @__PURE__ */ React.createElement("details", { className: "testAdvancedDetails compactDetails" }, /* @__PURE__ */ React.createElement("summary", null, "Bot profile context"), /* @__PURE__ */ React.createElement(Field, { label: "Business goal" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.business_goal || "", onChange: (event) => update("business_goal", event.target.value) })), /* @__PURE__ */ React.createElement(Field, { label: "Journeys / risks to cover" }, /* @__PURE__ */ React.createElement("textarea", { value: profile.flow_docs || "", onChange: (event) => update("flow_docs", event.target.value) }))), /* @__PURE__ */ React.createElement("div", { className: "buttonRow labActionRow" }, /* @__PURE__ */ React.createElement("button", { type: "button", onClick: generateSuite, disabled: loading === "generate-suite" }, /* @__PURE__ */ React.createElement(Icon, { name: "play_arrow" }), " ", generateSuiteLabel), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: saveProfile, disabled: loading === "save-profile" }, "Save Project Profile")));
   }
   function DocsTab({ docsPages, documents, changePlans, uploadDocument, analyzeDocument, approvePlan, activeProjectId, chat, sendMessage, createDocsChat, loading }) {
     const [query, setQuery] = useState("");
@@ -1400,8 +1547,8 @@ var BotQAApp = (() => {
   }
   function SuiteList({ suites, channel, runSuite, loading }) {
     const label = channel || "chat";
-    if (!suites.length) return /* @__PURE__ */ React.createElement(EmptyState, { title: `No ${label} suites yet`, text: `Generate a ${label} suite from Bot Core Config.` });
-    return /* @__PURE__ */ React.createElement("div", { className: "cardList" }, suites.map((suite) => /* @__PURE__ */ React.createElement("article", { className: "dataCard", key: suite.id }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", null, suite.name), /* @__PURE__ */ React.createElement("p", null, suite.id, " - ", suite.source)), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, suiteChannelCount(suite, channel), " ", label, " cases"), /* @__PURE__ */ React.createElement(Pill, null, (suite.test_cases || []).length, " total cases"), Object.entries(suiteScenarioCounts(suite, channel)).slice(0, 3).map(([key, value]) => /* @__PURE__ */ React.createElement(Pill, { key }, key, ": ", value))), /* @__PURE__ */ React.createElement("div", { className: "buttonRow" }, /* @__PURE__ */ React.createElement(
+    if (!suites.length) return /* @__PURE__ */ React.createElement(EmptyState, { title: `No ${label} suites yet`, text: `Generate a ${label} suite from the Playwright Testing Lab.` });
+    return /* @__PURE__ */ React.createElement("div", { className: "cardList" }, suites.map((suite) => /* @__PURE__ */ React.createElement("article", { className: "dataCard", key: suite.id }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", null, suite.name), /* @__PURE__ */ React.createElement("p", null, suite.generated_at_label || formatTimestamp(suite.created_at), " \xB7 ", suite.source, " \xB7 ", suite.id)), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: "ok" }, suiteChannelCount(suite, channel), " ", label, " cases"), /* @__PURE__ */ React.createElement(Pill, null, (suite.test_cases || []).length, " total cases"), Object.entries(suiteScenarioCounts(suite, channel)).slice(0, 3).map(([key, value]) => /* @__PURE__ */ React.createElement(Pill, { key }, key, ": ", value))), /* @__PURE__ */ React.createElement("div", { className: "buttonRow" }, /* @__PURE__ */ React.createElement(
       "button",
       {
         className: "secondaryButton",
@@ -1415,10 +1562,15 @@ var BotQAApp = (() => {
       loading === `run-${suite.id}` ? "Running..." : "Run Playwright"
     )))));
   }
-  function RunList({ runs, channel, openReport }) {
+  function RunList({ runs, suites = [], channel, openReport }) {
     const label = channel || "chat";
+    const suiteById = Object.fromEntries((suites || []).map((suite) => [suite.id, suite]));
     if (!runs.length) return /* @__PURE__ */ React.createElement(EmptyState, { title: `No ${label} runs yet`, text: `Run a ${label} suite to create reports.` });
-    return /* @__PURE__ */ React.createElement("div", { className: "cardList" }, runs.map((run) => /* @__PURE__ */ React.createElement("article", { className: "dataCard compact", key: run.id }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", null, run.id), /* @__PURE__ */ React.createElement("p", null, run.created_at, " - ", label)), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: run.average_score >= 0.78 ? "ok" : "warn" }, run.average_score), /* @__PURE__ */ React.createElement(Pill, null, run.total_cases, " cases")), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => openReport(run.report_id) }, "Open Report"))));
+    return /* @__PURE__ */ React.createElement("div", { className: "cardList" }, runs.map((run) => {
+      const suite = suiteById[run.suite_id];
+      const title = run.name || (suite?.name ? `${label} run \xB7 ${suite.name}` : `${label} run`);
+      return /* @__PURE__ */ React.createElement("article", { className: "dataCard compact", key: run.id }, /* @__PURE__ */ React.createElement("div", null, /* @__PURE__ */ React.createElement("h3", null, title), /* @__PURE__ */ React.createElement("p", null, run.created_at_label || formatTimestamp(run.created_at), " \xB7 ", label, " \xB7 ", run.id)), /* @__PURE__ */ React.createElement("div", { className: "pillRow" }, /* @__PURE__ */ React.createElement(Pill, { tone: run.average_score >= 0.78 ? "ok" : "warn" }, run.average_score), /* @__PURE__ */ React.createElement(Pill, null, run.total_cases, " cases")), /* @__PURE__ */ React.createElement("button", { className: "secondaryButton", type: "button", onClick: () => openReport(run.report_id) }, "Open Report"));
+    }));
   }
   function ReportView({ report, channel = "" }) {
     const label = channel || "chat";

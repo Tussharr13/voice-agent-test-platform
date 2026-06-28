@@ -1,3 +1,5 @@
+import { readWorkspaceState, writeWorkspaceState } from "./workspacePersistence.mjs";
+
 const { useEffect, useMemo, useRef, useState } = React;
 
 const emptyProfile = {
@@ -290,6 +292,14 @@ function formatLoadingMessage(label) {
   return label.replace(/-/g, " ");
 }
 
+function formatTimestamp(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value).slice(0, 16);
+  const pad = (number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
 function ToastStack({ toasts, onDismiss }) {
   if (!toasts.length) return null;
   return (
@@ -321,11 +331,13 @@ function LoadingStatus({ loading }) {
 }
 
 function App() {
+  const [initialWorkspaceState] = useState(() => readWorkspaceState());
   const [auth, setAuth] = useState({ loading: true, authenticated: false, user: null });
-  const [activeTab, setActiveTab] = useState("analyzer");
-  const [activeProjectId, setActiveProjectId] = useState("");
-  const [activeChatId, setActiveChatId] = useState("");
-  const [activeDocsChatId, setActiveDocsChatId] = useState("");
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [activeTab, setActiveTab] = useState(initialWorkspaceState.activeTab);
+  const [activeProjectId, setActiveProjectId] = useState(initialWorkspaceState.activeProjectId);
+  const [activeChatId, setActiveChatId] = useState(initialWorkspaceState.activeChatId);
+  const [activeDocsChatId, setActiveDocsChatId] = useState(initialWorkspaceState.activeDocsChatId);
   const [projects, setProjects] = useState([]);
   const [chats, setChats] = useState([]);
   const [suites, setSuites] = useState([]);
@@ -345,6 +357,7 @@ function App() {
   const [chatToDelete, setChatToDelete] = useState(null);
   const [toasts, setToasts] = useState([]);
   const toastTimers = useRef({});
+  const workspaceReady = useRef(false);
 
   function addToast(message, tone = "info") {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -377,6 +390,11 @@ function App() {
   const analyzerChat = useMemo(() => chats.find((chat) => chat.id === activeChatId), [chats, activeChatId]);
   const docsChat = useMemo(() => chats.find((chat) => chat.id === activeDocsChatId), [chats, activeDocsChatId]);
 
+  useEffect(() => {
+    if (!workspaceReady.current) return;
+    writeWorkspaceState({ activeTab, activeProjectId, activeChatId, activeDocsChatId });
+  }, [activeTab, activeProjectId, activeChatId, activeDocsChatId]);
+
   function resetWorkspace() {
     setActiveProjectId("");
     setActiveChatId("");
@@ -395,62 +413,76 @@ function App() {
     setProfile(emptyProfile);
     setLatestReport(null);
     setSearch("");
+    workspaceReady.current = false;
+    setWorkspaceLoading(false);
   }
 
   async function refresh(options = {}) {
-    let projectsPayload;
+    const initialLoad = !workspaceReady.current;
+    if (initialLoad) setWorkspaceLoading(true);
     try {
-      projectsPayload = await api("/api/projects");
-    } catch (err) {
-      if (err.status === 401) {
-        resetWorkspace();
-        setAuth({ loading: false, authenticated: false, user: null });
+      let projectsPayload;
+      try {
+        projectsPayload = await api("/api/projects");
+      } catch (err) {
+        if (err.status === 401) {
+          resetWorkspace();
+          setAuth({ loading: false, authenticated: false, user: null });
+        }
+        throw err;
       }
-      throw err;
+      const nextProjects = projectsPayload.projects || [];
+      const preferredProjectId = Object.prototype.hasOwnProperty.call(options, "projectId") ? options.projectId : activeProjectId;
+      const nextProjectId =
+        preferredProjectId && nextProjects.some((project) => project.id === preferredProjectId)
+          ? preferredProjectId
+          : projectsPayload.active_project_id || nextProjects[0]?.id || "";
+
+      const [chatsPayload, suitesPayload, runsPayload, docsPayload, snapshotsPayload, accessPayload, voicePayload, docsPagesPayload, configPayload] = await Promise.all([
+        api(projectQuery("/api/chats", nextProjectId)),
+        api(projectQuery("/api/suites", nextProjectId)),
+        api(projectQuery("/api/runs", nextProjectId)),
+        api(projectQuery("/api/documents", nextProjectId)),
+        api(projectQuery("/api/platform-snapshots", nextProjectId)),
+        api(projectQuery("/api/project-access", nextProjectId)),
+        api(projectQuery("/api/voice", nextProjectId)),
+        api("/api/docs/pages"),
+        api("/api/config"),
+      ]);
+
+      setProjects(nextProjects);
+      setActiveProjectId(nextProjectId);
+      setChats(chatsPayload.chats || []);
+      setSuites(suitesPayload || []);
+      setRuns(runsPayload || []);
+      setDocuments(docsPayload.documents || []);
+      setChangePlans(docsPayload.change_plans || []);
+      setPlatformSnapshots(snapshotsPayload.snapshots || []);
+      setYellowAccess(accessPayload);
+      setVoiceData(voicePayload);
+      setDocsPages(docsPagesPayload.pages || []);
+      setConfig(configPayload);
+
+      const nextProject = nextProjects.find((project) => project.id === nextProjectId) || nextProjects[0];
+      setProfile({ ...emptyProfile, ...(nextProject?.bot_profile || {}) });
+      const preferredAnalyzerId = Object.prototype.hasOwnProperty.call(options, "activeChatId") ? options.activeChatId : activeChatId;
+      const preferredDocsChatId = Object.prototype.hasOwnProperty.call(options, "activeDocsChatId") ? options.activeDocsChatId : activeDocsChatId;
+      const analyzer =
+        (chatsPayload.chats || []).find((chat) => chat.id === preferredAnalyzerId && chat.mode === "analyzer") ||
+        (chatsPayload.chats || []).find((chat) => chat.mode === "analyzer");
+      const docs =
+        (chatsPayload.chats || []).find((chat) => chat.id === preferredDocsChatId && chat.mode === "docs") ||
+        (chatsPayload.chats || []).find((chat) => chat.mode === "docs");
+      const nextAnalyzerId = analyzer?.id || "";
+      const nextDocsId = docs?.id || "";
+      setActiveChatId(nextAnalyzerId);
+      setActiveDocsChatId(nextDocsId);
+      if (!options.keepReport) setLatestReport(null);
+      workspaceReady.current = true;
+      writeWorkspaceState({ activeTab, activeProjectId: nextProjectId, activeChatId: nextAnalyzerId, activeDocsChatId: nextDocsId });
+    } finally {
+      if (initialLoad) setWorkspaceLoading(false);
     }
-    const nextProjects = projectsPayload.projects || [];
-    const nextProjectId =
-      options.projectId ||
-      (activeProjectId && nextProjects.some((project) => project.id === activeProjectId) ? activeProjectId : projectsPayload.active_project_id || nextProjects[0]?.id || "");
-
-    const [chatsPayload, suitesPayload, runsPayload, docsPayload, snapshotsPayload, accessPayload, voicePayload, docsPagesPayload, configPayload] = await Promise.all([
-      api(projectQuery("/api/chats", nextProjectId)),
-      api(projectQuery("/api/suites", nextProjectId)),
-      api(projectQuery("/api/runs", nextProjectId)),
-      api(projectQuery("/api/documents", nextProjectId)),
-      api(projectQuery("/api/platform-snapshots", nextProjectId)),
-      api(projectQuery("/api/project-access", nextProjectId)),
-      api(projectQuery("/api/voice", nextProjectId)),
-      api("/api/docs/pages"),
-      api("/api/config"),
-    ]);
-
-    setProjects(nextProjects);
-    setActiveProjectId(nextProjectId);
-    setChats(chatsPayload.chats || []);
-    setSuites(suitesPayload || []);
-    setRuns(runsPayload || []);
-    setDocuments(docsPayload.documents || []);
-    setChangePlans(docsPayload.change_plans || []);
-    setPlatformSnapshots(snapshotsPayload.snapshots || []);
-    setYellowAccess(accessPayload);
-    setVoiceData(voicePayload);
-    setDocsPages(docsPagesPayload.pages || []);
-    setConfig(configPayload);
-
-    const nextProject = nextProjects.find((project) => project.id === nextProjectId) || nextProjects[0];
-    setProfile({ ...emptyProfile, ...(nextProject?.bot_profile || {}) });
-    const preferredAnalyzerId = Object.prototype.hasOwnProperty.call(options, "activeChatId") ? options.activeChatId : activeChatId;
-    const preferredDocsChatId = Object.prototype.hasOwnProperty.call(options, "activeDocsChatId") ? options.activeDocsChatId : activeDocsChatId;
-    const analyzer =
-      (chatsPayload.chats || []).find((chat) => chat.id === preferredAnalyzerId && chat.mode === "analyzer") ||
-      (chatsPayload.chats || []).find((chat) => chat.mode === "analyzer");
-    const docs =
-      (chatsPayload.chats || []).find((chat) => chat.id === preferredDocsChatId && chat.mode === "docs") ||
-      (chatsPayload.chats || []).find((chat) => chat.mode === "docs");
-    setActiveChatId(analyzer?.id || "");
-    setActiveDocsChatId(docs?.id || "");
-    if (!options.keepReport) setLatestReport(null);
   }
 
   useEffect(() => {
@@ -458,7 +490,12 @@ function App() {
       .then(async (session) => {
         setAuth({ loading: false, authenticated: !!session.authenticated, user: session.user || null });
         if (session.authenticated) {
-          await refresh({ keepReport: false });
+          await refresh({
+            keepReport: false,
+            projectId: initialWorkspaceState.activeProjectId,
+            activeChatId: initialWorkspaceState.activeChatId,
+            activeDocsChatId: initialWorkspaceState.activeDocsChatId,
+          });
         }
       })
       .catch((err) => {
@@ -469,7 +506,12 @@ function App() {
 
   async function handleAuthenticated(session) {
     setAuth({ loading: false, authenticated: true, user: session.user });
-    await refresh({ keepReport: false });
+    await refresh({
+      keepReport: false,
+      projectId: initialWorkspaceState.activeProjectId,
+      activeChatId: initialWorkspaceState.activeChatId,
+      activeDocsChatId: initialWorkspaceState.activeDocsChatId,
+    });
   }
 
   async function logout() {
@@ -786,11 +828,15 @@ function App() {
   }
 
   if (auth.loading) {
-    return <SplashScreen />;
+    return <SplashScreen message="Checking your session" />;
   }
 
   if (!auth.authenticated) {
     return <AuthScreen onAuthenticated={handleAuthenticated} />;
+  }
+
+  if (workspaceLoading) {
+    return <SplashScreen message="Restoring projects, chats, tests, and reports" detail="Your last workspace context will open automatically." />;
   }
 
   return (
@@ -903,7 +949,7 @@ function App() {
   );
 }
 
-function SplashScreen() {
+function SplashScreen({ message = "Loading workspace", detail = "Preparing your bot QA workbench." }) {
   return (
     <main className="authShell">
       <section className="authCard compact">
@@ -911,8 +957,12 @@ function SplashScreen() {
           <div className="brandMark">QA</div>
           <div>
             <h1>QA Workbench</h1>
-            <p>Loading workspace</p>
+            <p>{message}</p>
           </div>
+        </div>
+        <div className="workspaceLoader" role="status" aria-live="polite">
+          <span className="workspaceLoaderSpinner" aria-hidden="true" />
+          <span>{detail}</span>
         </div>
       </section>
     </main>
@@ -1036,7 +1086,7 @@ function Sidebar(props) {
                 <div key={chat.id} className={cx("chatListItem", chat.id === props.activeChatId && "active")}>
                   <button className="chatSelectButton" type="button" onClick={() => props.setChat(chat)}>
                     <span>{chat.title}</span>
-                    <small>{chat.mode}</small>
+                    <small>{[chat.mode, formatTimestamp(chat.updated_at || chat.created_at)].filter(Boolean).join(" · ")}</small>
                   </button>
                   <button className="chatDeleteButton" type="button" aria-label={`Delete ${chat.title}`} title="Delete chat" onClick={() => props.deleteChat(chat)}>
                     <Icon name="delete" />
@@ -1594,14 +1644,14 @@ function ContextPanel({ activeProject, documents, changePlans, suites, runs, pla
             <p>{goalBrief.title || goalBrief.goal}</p>
           </div>
         ) : (
-          <EmptyState title="No goal brief" text="Use Analyzer to prepare an adaptive test brief for the Testing tab." />
+          <EmptyState title="No goal brief" text="Use Analyzer to prepare an adaptive Playwright brief for the Testing Lab." />
         )}
       </div>
       <div className="contextBlock">
         <h3>Next steps</h3>
         <ul className="compactList">
           <li>{latestSnapshot ? `Use ${latestSnapshot.id} for failure root-cause analysis.` : "Run a platform snapshot to attach Studio context automatically."}</li>
-          <li>{goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare a goal-driven test brief from Analyzer."}</li>
+          <li>{goalBrief?.id ? `Run prepared goal brief ${goalBrief.id}.` : "Prepare an adaptive Playwright brief from Analyzer."}</li>
           <li>{runs[0] ? `Open latest report ${runs[0].report_id}` : "Run a real web-widget chat automation script."}</li>
         </ul>
       </div>
@@ -1695,9 +1745,9 @@ function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, r
       </section>
       {testMode === "chat" ? (
         <>
-          <div className="mainGrid testingGrid">
-            <section className="workPanel">
-              <PanelHeader title="Bot Core Config" />
+          <section className="workPanel testingLabPanel">
+            <PanelHeader title="Playwright Testing Lab" meta="Generate suites and run live chat tests from one place" />
+            <div className="testingLabGrid">
               <BotCoreConfig
                 profile={profile}
                 setProfile={setProfile}
@@ -1706,9 +1756,6 @@ function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, r
                 generateSuiteLabel="Generate Chat Suite"
                 loading={loading}
               />
-            </section>
-            <section className="workPanel">
-              <PanelHeader title="Run Chat Tests" />
               <ChatAutomationPanel
                 profile={profile}
                 setProfile={setProfile}
@@ -1718,8 +1765,8 @@ function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, r
                 config={config}
                 loading={loading}
               />
-            </section>
-          </div>
+            </div>
+          </section>
           <div className="mainGrid testingGrid">
             <section className="workPanel scrollPanel">
               <PanelHeader title="Chat Suites" meta={`${activeSuites.length} TOTAL`} />
@@ -1730,7 +1777,7 @@ function TestingTab({ profile, setProfile, saveProfile, generateSuite, suites, r
             <section className="workPanel scrollPanel">
               <PanelHeader title="Chat Runs" meta={`${activeRuns.length} RECENT`} />
               <div className="scrollRegion" ref={runsScrollRef}>
-                <RunList runs={activeRuns} channel={testChannel} openReport={openReport} />
+                <RunList runs={activeRuns} suites={activeSuites} channel={testChannel} openReport={openReport} />
               </div>
             </section>
           </div>
@@ -1996,19 +2043,19 @@ function ChatAutomationPanel({ profile, setProfile, runChatAutomation, runGoalCh
   const [constraints, setConstraints] = useState("Use realistic user replies. Do not switch language unless the user explicitly asks. Continue until the journey reaches success, a clear bot-side failure, a loop, or a restart.");
   const [testData, setTestData] = useState("Name: Test User. Purchase source: Amazon. Order ID: Not Available. Product category: Water Purifier. Product: Kent Grand Plus. Pincode: 560102. Address: Flat 101, Test Apartments, HSR Layout, Bengaluru. Confirmation: Confirm. Date preference: Tomorrow.");
   const [successCriteria, setSuccessCriteria] = useState("The bot should keep the same journey, collect required details one by one, ask for confirmation when needed, and give a positive closure after confirmation.");
-  const [maxTurns, setMaxTurns] = useState("18");
   const lastAppliedBriefId = useRef("");
   const playwright = config?.playwright || {};
   const turnsInScript = scriptTurnCount(script);
   const scriptIsShort = turnsInScript > 0 && turnsInScript < 6;
   const update = (key, value) => setProfile((current) => ({ ...current, [key]: value }));
+  const maxTurns = profile.goal_max_turns || profile.chat_max_adaptive_turns || "18";
   function applyGoalBrief(brief) {
     if (!brief) return;
     setGoal(brief.goal || "");
     setConstraints(brief.constraints || "");
     setTestData(brief.test_data || "");
     setSuccessCriteria(brief.success_criteria || "");
-    setMaxTurns(String(brief.max_turns || "10"));
+    update("goal_max_turns", String(brief.max_turns || maxTurns || "18"));
   }
   useEffect(() => {
     if (!goalBrief?.id || goalBrief.id === lastAppliedBriefId.current) return;
@@ -2026,8 +2073,8 @@ function ChatAutomationPanel({ profile, setProfile, runChatAutomation, runGoalCh
     <div className="automationPanel">
       <div className="automationHeader">
         <div>
-          <h3>Chat Automation</h3>
-          <p>Goal-driven exploration or Markdown scripts run through the configured web widget and produce scenario-level project reports.</p>
+          <h3>Adaptive Playwright Runner</h3>
+          <p>Run one adaptive web-widget journey and produce a report.</p>
         </div>
         <div className="pillRow">
           <Pill tone={playwright.available ? "ok" : "warn"}>{playwright.available ? "Playwright ready" : "Playwright setup"}</Pill>
@@ -2038,7 +2085,7 @@ function ChatAutomationPanel({ profile, setProfile, runChatAutomation, runGoalCh
         <div className="sectionTitleRow">
           <div>
             <h4>Goal-Driven Test</h4>
-            <p>Describe the journey once. The tester observes bot replies, chooses clicks/messages adaptively, and stops on success, loop, or failure.</p>
+            <p>Give the intent, data, and pass criteria. The runner adapts turn by turn.</p>
           </div>
           <Pill tone="ok">Adaptive</Pill>
         </div>
@@ -2065,14 +2112,9 @@ function ChatAutomationPanel({ profile, setProfile, runChatAutomation, runGoalCh
             <textarea className="compactTextarea" value={testData} onChange={(event) => setTestData(event.target.value)} />
           </Field>
         </div>
-        <div className="twoCol">
-          <Field label="Success criteria">
-            <textarea className="compactTextarea" value={successCriteria} onChange={(event) => setSuccessCriteria(event.target.value)} />
-          </Field>
-          <Field label="Max adaptive turns">
-            <input type="number" min="2" max="20" inputMode="numeric" value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} />
-          </Field>
-        </div>
+        <Field label="Success criteria">
+          <textarea className="compactTextarea" value={successCriteria} onChange={(event) => setSuccessCriteria(event.target.value)} />
+        </Field>
         <div className="automationActions">
           <button
             type="button"
@@ -2150,7 +2192,7 @@ function BotCoreConfig({ profile, setProfile, saveProfile, generateSuite, genera
   const update = (key, value) => setProfile((current) => ({ ...current, [key]: value }));
   return (
     <div className="configForm">
-      <div className="twoCol">
+      <div className="labFieldGrid">
         <Field label="Bot name">
           <input value={profile.bot_name || ""} onChange={(event) => update("bot_name", event.target.value)} />
         </Field>
@@ -2164,38 +2206,54 @@ function BotCoreConfig({ profile, setProfile, saveProfile, generateSuite, genera
             onChange={(event) => update("chat_case_count", event.target.value)}
           />
         </Field>
+        <Field label="Max adaptive turns">
+          <input
+            type="number"
+            min="2"
+            max="20"
+            inputMode="numeric"
+            value={profile.goal_max_turns || profile.chat_max_adaptive_turns || "18"}
+            onChange={(event) => {
+              update("goal_max_turns", event.target.value);
+              update("chat_max_adaptive_turns", event.target.value);
+            }}
+          />
+        </Field>
+        <Field label="Chat endpoint / widget URL">
+          <input value={profile.chat_endpoint || ""} onChange={(event) => update("chat_endpoint", event.target.value)} placeholder="https://..." />
+        </Field>
       </div>
-      <Field label="Chat endpoint / widget URL">
-        <input value={profile.chat_endpoint || ""} onChange={(event) => update("chat_endpoint", event.target.value)} placeholder="https://..." />
-      </Field>
-      <Field label="Business goal">
-        <textarea value={profile.business_goal || ""} onChange={(event) => update("business_goal", event.target.value)} />
-      </Field>
-      <Field label="Journeys / risks to cover">
-        <textarea value={profile.flow_docs || ""} onChange={(event) => update("flow_docs", event.target.value)} />
-      </Field>
-      <div className="suiteRequestToggleRow">
-        <button className="secondaryButton" type="button" onClick={() => setShowSuiteRequest((current) => !current)}>
-          <Icon name={showSuiteRequest ? "expand_less" : "tune"} /> {showSuiteRequest ? "Hide specific request" : "Specific suite request"}
-        </button>
-        {profile.suite_request && <Pill tone="ok">custom request active</Pill>}
-      </div>
-      {showSuiteRequest && (
-        <div className="suiteRequestPanel">
-          <Field label="What specific tests or suite do you need?">
-            <textarea
-              className="compactTextarea"
-              value={profile.suite_request || ""}
-              onChange={(event) => update("suite_request", event.target.value)}
-              placeholder="Example: Create 8 installation booking cases focused on language persistence, pincode validation, confirmation after address capture, fallback recovery, and positive closure."
-            />
-          </Field>
-          <p className="fieldHint">
-            This request is used only for suite generation. The bot profile and discovered Yellow.ai context still stay as the source of truth.
-          </p>
+      <section className="suiteRequestBlock">
+        <div className="suiteRequestToggleRow">
+          <button className="secondaryButton" type="button" onClick={() => setShowSuiteRequest((current) => !current)}>
+            <Icon name={showSuiteRequest ? "expand_less" : "tune"} /> {showSuiteRequest ? "Hide request" : "Specific suite request"}
+          </button>
+          {profile.suite_request && <Pill tone="ok">custom request active</Pill>}
         </div>
-      )}
-      <div className="buttonRow">
+        {showSuiteRequest && (
+          <div className="suiteRequestPanel">
+            <Field label="What specific tests or suite do you need?">
+              <textarea
+                className="compactTextarea"
+                value={profile.suite_request || ""}
+                onChange={(event) => update("suite_request", event.target.value)}
+                placeholder="Example: Create 8 installation booking cases focused on language persistence, pincode validation, confirmation after address capture, fallback recovery, and positive closure."
+              />
+            </Field>
+            <p className="fieldHint">Used only for suite generation. Bot profile and Yellow.ai context stay as the source of truth.</p>
+          </div>
+        )}
+      </section>
+      <details className="testAdvancedDetails compactDetails">
+        <summary>Bot profile context</summary>
+        <Field label="Business goal">
+          <textarea value={profile.business_goal || ""} onChange={(event) => update("business_goal", event.target.value)} />
+        </Field>
+        <Field label="Journeys / risks to cover">
+          <textarea value={profile.flow_docs || ""} onChange={(event) => update("flow_docs", event.target.value)} />
+        </Field>
+      </details>
+      <div className="buttonRow labActionRow">
         <button type="button" onClick={generateSuite} disabled={loading === "generate-suite"}>
           <Icon name="play_arrow" /> {generateSuiteLabel}
         </button>
@@ -2504,14 +2562,14 @@ function safeMarkdownHref(value) {
 
 function SuiteList({ suites, channel, runSuite, loading }) {
   const label = channel || "chat";
-  if (!suites.length) return <EmptyState title={`No ${label} suites yet`} text={`Generate a ${label} suite from Bot Core Config.`} />;
+  if (!suites.length) return <EmptyState title={`No ${label} suites yet`} text={`Generate a ${label} suite from the Playwright Testing Lab.`} />;
   return (
     <div className="cardList">
       {suites.map((suite) => (
         <article className="dataCard" key={suite.id}>
           <div>
             <h3>{suite.name}</h3>
-            <p>{suite.id} - {suite.source}</p>
+            <p>{suite.generated_at_label || formatTimestamp(suite.created_at)} · {suite.source} · {suite.id}</p>
           </div>
           <div className="pillRow">
             <Pill tone="ok">{suiteChannelCount(suite, channel)} {label} cases</Pill>
@@ -2535,24 +2593,29 @@ function SuiteList({ suites, channel, runSuite, loading }) {
   );
 }
 
-function RunList({ runs, channel, openReport }) {
+function RunList({ runs, suites = [], channel, openReport }) {
   const label = channel || "chat";
+  const suiteById = Object.fromEntries((suites || []).map((suite) => [suite.id, suite]));
   if (!runs.length) return <EmptyState title={`No ${label} runs yet`} text={`Run a ${label} suite to create reports.`} />;
   return (
     <div className="cardList">
-      {runs.map((run) => (
-        <article className="dataCard compact" key={run.id}>
-          <div>
-            <h3>{run.id}</h3>
-            <p>{run.created_at} - {label}</p>
-          </div>
-          <div className="pillRow">
-            <Pill tone={run.average_score >= 0.78 ? "ok" : "warn"}>{run.average_score}</Pill>
-            <Pill>{run.total_cases} cases</Pill>
-          </div>
-          <button className="secondaryButton" type="button" onClick={() => openReport(run.report_id)}>Open Report</button>
-        </article>
-      ))}
+      {runs.map((run) => {
+        const suite = suiteById[run.suite_id];
+        const title = run.name || (suite?.name ? `${label} run · ${suite.name}` : `${label} run`);
+        return (
+          <article className="dataCard compact" key={run.id}>
+            <div>
+              <h3>{title}</h3>
+              <p>{run.created_at_label || formatTimestamp(run.created_at)} · {label} · {run.id}</p>
+            </div>
+            <div className="pillRow">
+              <Pill tone={run.average_score >= 0.78 ? "ok" : "warn"}>{run.average_score}</Pill>
+              <Pill>{run.total_cases} cases</Pill>
+            </div>
+            <button className="secondaryButton" type="button" onClick={() => openReport(run.report_id)}>Open Report</button>
+          </article>
+        );
+      })}
     </div>
   );
 }

@@ -75,6 +75,30 @@ body {
   width: min(360px, 100%);
 }
 
+.workspaceLoader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  background: var(--surface-low);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.workspaceLoaderSpinner {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 2px solid var(--line-strong);
+  border-top-color: var(--yellow-line);
+  border-radius: 999px;
+  animation: spin 800ms linear infinite;
+}
+
 .authBrand {
   display: flex;
   align-items: center;
@@ -203,6 +227,12 @@ h3 {
   font-size: 14px;
   line-height: 1.4;
   font-weight: 600;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 code {
@@ -963,6 +993,19 @@ code {
   grid-template-columns: minmax(360px, 0.92fr) minmax(0, 1.08fr);
 }
 
+.testingLabPanel {
+  overflow: hidden;
+}
+
+.testingLabGrid {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.82fr) minmax(520px, 1.18fr);
+  gap: 14px;
+  align-items: start;
+  padding: 14px;
+  background: #fbfcfe;
+}
+
 .docsGrid {
   grid-template-columns: minmax(0, 1fr) minmax(320px, 0.84fr);
 }
@@ -1283,7 +1326,39 @@ code {
 }
 
 .configForm {
-  gap: 14px;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #ffffff;
+}
+
+.testingLabGrid .field {
+  gap: 5px;
+  font-size: 11px;
+}
+
+.labFieldGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.testingLabGrid input,
+.testingLabGrid select,
+.testingLabGrid textarea {
+  min-height: 38px;
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.testingLabGrid input {
+  font-weight: 650;
 }
 
 .suiteRequestToggleRow {
@@ -1293,27 +1368,32 @@ code {
   flex-wrap: wrap;
 }
 
+.suiteRequestBlock {
+  display: grid;
+  gap: 10px;
+}
+
 .suiteRequestPanel {
   display: grid;
   gap: 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 12px;
+  padding: 10px;
   background: var(--surface-low);
 }
 
 .suiteRequestPanel textarea {
-  min-height: 112px;
+  min-height: 86px;
 }
 
 .automationPanel {
   display: grid;
   gap: 12px;
-  margin: 0 16px 16px;
-  padding: 14px;
+  margin: 0;
+  padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--surface-low);
+  background: #ffffff;
 }
 
 .automationHeader {
@@ -1324,7 +1404,7 @@ code {
 }
 
 .automationHeader h3 {
-  color: #4f4100;
+  color: #252b35;
   font-size: 12px;
   font-weight: 800;
   text-transform: uppercase;
@@ -1338,11 +1418,11 @@ code {
 
 .goalRunnerPanel {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   padding: 12px;
-  border: 1px solid #ead68a;
+  border: 1px solid #f1d067;
   border-radius: var(--radius);
-  background: #fff9db;
+  background: #fffdf2;
 }
 
 .briefNotice {
@@ -1350,7 +1430,7 @@ code {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  padding: 10px;
+  padding: 9px 10px;
   border: 1px solid #d8eadc;
   border-radius: 6px;
   background: #f3fbf5;
@@ -1400,8 +1480,16 @@ code {
 }
 
 .compactTextarea {
-  min-height: 72px;
+  min-height: 62px;
   resize: vertical;
+}
+
+.goalRunnerPanel > .field:first-of-type .compactTextarea {
+  min-height: 70px;
+}
+
+.goalRunnerPanel > .field:nth-of-type(2) .compactTextarea {
+  min-height: 78px;
 }
 
 .automationScript {
@@ -1499,6 +1587,23 @@ code {
   margin: 0 -12px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--surface-low);
+}
+
+.compactDetails {
+  background: #ffffff;
+}
+
+.compactDetails[open] {
+  display: grid;
+  gap: 12px;
+}
+
+.compactDetails:not([open]) {
+  min-height: auto;
+}
+
+.labActionRow {
+  margin-top: 2px;
 }
 
 .field {
@@ -2453,6 +2558,7 @@ textarea:focus {
 @media (max-width: 1200px) {
   .analyzerGrid,
   .testingGrid,
+  .testingLabGrid,
   .voiceGrid,
   .voiceBottomGrid,
   .docsGrid {
@@ -2568,6 +2674,7 @@ textarea:focus {
   }
 
   .twoCol,
+  .labFieldGrid,
   .accessGrid,
   .settingsGrid,
   .metricGrid,
